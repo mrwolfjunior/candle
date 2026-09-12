@@ -61,4 +61,5 @@ exec "$BIN" \
     --gamma "$GAMMA" \
     --max-context "$MAX_CONTEXT" \
     ${TARGET_MODEL:+--target-model "$TARGET_MODEL"} \
-    ${DRAFT_MODEL:+--draft-model "$DRAFT_MODEL"}
+    ${DRAFT_MODEL:+--draft-model "$DRAFT_MODEL"} \
+    "$@"
