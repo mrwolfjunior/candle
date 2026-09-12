@@ -275,7 +275,13 @@ fn main() -> anyhow::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let eos_token = *tos.tokenizer().get_vocab(true).get("<|im_end|>").unwrap();
+        let eos_token = tos
+            .tokenizer()
+            .get_vocab(true)
+            .get("<|im_end|>")
+            .or_else(|| tos.tokenizer().get_vocab(true).get("<|endoftext|>"))
+            .copied()
+            .unwrap_or(u32::MAX);
 
         let start_post_prompt = std::time::Instant::now();
 
