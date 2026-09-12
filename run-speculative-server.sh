@@ -43,12 +43,18 @@ echo "  Target Device: $TARGET_DEV"
 echo "  Lookahead (gamma): $GAMMA"
 echo "  Context:       $MAX_CONTEXT tokens"
 
+if [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
 # Build with multi-arch flags for Pascal (sm_61) and Turing (sm_75)
-if [ "${BUILD_RELEASE:-1}" = "1" ]; then
+if [ "${BUILD_RELEASE:-0}" = "1" ] || [ ! -f "./target/release/speculative-server" ]; then
     echo "Compiling binary with multi-architecture CUDA support (sm_61 + sm_75)..."
     CUDA_COMPUTE_CAP=61 CANDLE_CUDA_ARCHS="61,75" cargo build --release --features cuda -p candle-speculative-server --bin speculative-server
-    BIN="./target/release/speculative-server"
-else
+fi
+
+BIN="./target/release/speculative-server"
+if [ ! -f "$BIN" ] && [ -f "./target/debug/speculative-server" ]; then
     BIN="./target/debug/speculative-server"
 fi
 
