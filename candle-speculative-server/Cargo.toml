@@ -5,6 +5,10 @@ edition = "2021"
 description = "Asymmetric speculative inference server for heterogeneous dual-GPU setups"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "speculative-server"
+path = "src/main.rs"
+
 [dependencies]
 candle = { path = "../candle-core", package = "candle-core", version = "0.11.0" }
 candle-nn = { path = "../candle-nn", version = "0.11.0" }
