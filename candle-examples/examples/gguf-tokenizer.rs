@@ -22,6 +22,9 @@ struct Args {
     /// Text prompt to tokenize with the GGUF tokenizer.
     #[arg(long, default_value = "Hello Candle!")]
     prompt: String,
+    /// Optional path to save the extracted tokenizer as JSON.
+    #[arg(long)]
+    save: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -59,6 +62,11 @@ fn main() -> Result<()> {
         .context("failed to decode tokens")?;
 
     println!("Decoded (special tokens stripped): {decoded}");
+
+    if let Some(save_path) = &args.save {
+        tokenizer.save(save_path, true).map_err(anyhow::Error::msg)?;
+        println!("Saved tokenizer to {}", save_path.display());
+    }
 
     Ok(())
 }

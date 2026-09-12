@@ -9,6 +9,7 @@ use std::io::Write;
 use tokenizers::Tokenizer;
 
 use candle::quantized::gguf_file;
+use candle::quantized::tokenizer::TokenizerFromGguf;
 use candle::Tensor;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
@@ -99,23 +100,31 @@ struct Args {
 
 impl Args {
     fn tokenizer(&self) -> anyhow::Result<Tokenizer> {
-        let tokenizer_path = match &self.tokenizer {
-            Some(config) => std::path::PathBuf::from(config),
-            None => {
-                let api = candle_examples::hub::Api::new()?;
-                let repo = match self.which {
-                    Which::W3_0_6b => "Qwen/Qwen3-0.6B",
-                    Which::W3_0_6b8_0 => "Qwen/Qwen3-0.6B",
-                    Which::W3_1_7b => "Qwen/Qwen3-1.7B",
-                    Which::W3_4b => "Qwen/Qwen3-4B",
-                    Which::W3_8b => "Qwen/Qwen3-8B",
-                    Which::W3_14b => "Qwen/Qwen3-14B",
-                    Which::W3_32b => "Qwen/Qwen3-32B",
-                };
-                let api = api.model(repo);
-                api.get("tokenizer.json")?
+        if let Some(config) = &self.tokenizer {
+            return Tokenizer::from_file(config).map_err(anyhow::Error::msg);
+        }
+        if let Ok(model_path) = self.model() {
+            if let Ok(file) = std::fs::File::open(&model_path) {
+                let mut reader = std::io::BufReader::new(file);
+                if let Ok(content) = gguf_file::Content::read(&mut reader) {
+                    if let Ok(tok) = Tokenizer::from_gguf(&content) {
+                        return Ok(tok);
+                    }
+                }
             }
+        }
+        let api = candle_examples::hub::Api::new()?;
+        let repo = match self.which {
+            Which::W3_0_6b => "Qwen/Qwen3-0.6B",
+            Which::W3_0_6b8_0 => "Qwen/Qwen3-0.6B",
+            Which::W3_1_7b => "Qwen/Qwen3-1.7B",
+            Which::W3_4b => "Qwen/Qwen3-4B",
+            Which::W3_8b => "Qwen/Qwen3-8B",
+            Which::W3_14b => "Qwen/Qwen3-14B",
+            Which::W3_32b => "Qwen/Qwen3-32B",
         };
+        let api = api.model(repo);
+        let tokenizer_path = api.get("tokenizer.json")?;
         Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)
     }
 
