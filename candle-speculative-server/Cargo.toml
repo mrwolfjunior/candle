@@ -1,0 +1,29 @@
+[package]
+name = "candle-speculative-server"
+version = "0.1.0"
+edition = "2021"
+description = "Asymmetric speculative inference server for heterogeneous dual-GPU setups"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+candle = { path = "../candle-core", package = "candle-core", version = "0.11.0" }
+candle-nn = { path = "../candle-nn", version = "0.11.0" }
+candle-transformers = { path = "../candle-transformers", version = "0.11.0" }
+anyhow = { version = "1", features = ["backtrace"] }
+axum = { version = "0.8", features = ["tokio"] }
+clap = { version = "4.2.4", features = ["derive"] }
+futures-util = "0.3"
+rand = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokio = { version = "1.48", features = ["full"] }
+tokio-stream = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
