@@ -14,23 +14,13 @@ fn main() -> Result<()> {
     // Build for PTX
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let ptx_path = out_dir.join("ptx.rs");
-    let mut builder = KernelBuilder::new()
+    let bindings = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
         .exclude(&["moe_*.cu", "mmvq_gguf.cu", "mmq_*.cu"]) // Exclude statically compiled kernels from ptx build
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
-        .arg("-O3");
-
-    if let Ok(archs) = env::var("CANDLE_CUDA_ARCHS") {
-        for arch in archs.split(',') {
-            let arch = arch.trim();
-            if !arch.is_empty() {
-                builder = builder.arg(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
-            }
-        }
-    }
-
-    let bindings = builder.build_ptx()?;
+        .arg("-O3")
+        .build_ptx()?;
 
     bindings.write(&ptx_path)?;
 
@@ -80,6 +70,15 @@ fn main() -> Result<()> {
 
     if !is_target_msvc {
         moe_builder = moe_builder.arg("-Xcompiler").arg("-fPIC");
+    }
+
+    if let Ok(archs) = env::var("CANDLE_CUDA_ARCHS") {
+        for arch in archs.split(',') {
+            let arch = arch.trim();
+            if !arch.is_empty() {
+                moe_builder = moe_builder.arg(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            }
+        }
     }
 
     moe_builder.build_lib(out_dir.join("libmoe.a"))?;

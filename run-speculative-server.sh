@@ -46,7 +46,7 @@ echo "  Context:       $MAX_CONTEXT tokens"
 # Build with multi-arch flags for Pascal (sm_61) and Turing (sm_75)
 if [ "${BUILD_RELEASE:-1}" = "1" ]; then
     echo "Compiling binary with multi-architecture CUDA support (sm_61 + sm_75)..."
-    CANDLE_CUDA_ARCHS="61,75" cargo build --release --features cuda -p candle-speculative-server --bin speculative-server
+    CUDA_COMPUTE_CAP=61 CANDLE_CUDA_ARCHS="61,75" cargo build --release --features cuda -p candle-speculative-server --bin speculative-server
     BIN="./target/release/speculative-server"
 else
     BIN="./target/debug/speculative-server"
