@@ -23,7 +23,6 @@
 #include <cassert>
 #include <cstring>
 #include "moe_utils.cuh"
-using namespace nvcuda::wmma;
 
 namespace vllm_rs {
 
@@ -44,6 +43,8 @@ constexpr int M_BLK = 32;
 constexpr int N_BLK = 32;
 constexpr int K_BLK = WMMA_K;           // 16
 
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+using namespace nvcuda::wmma;
 
 /**
  *  @brief  WMMA-based grouped MoE GEMM kernel.
@@ -216,6 +217,23 @@ __global__ void moe_gemm_grouped_kernel(
         }
     } // end m_base loop
 }
+#else
+template<typename T, int WMMA_M, int WMMA_N, int WARPS_N>
+__global__ void moe_gemm_grouped_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weights,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ expert_offsets,
+    const float* __restrict__ topk_weights,
+    T* __restrict__ output,
+    const int num_experts, const int topk,
+    const int32_t size_m,
+    const int32_t size_n,
+    const int32_t size_k
+) {
+    // Dummy stub for architectures without Tensor Cores (< sm_70)
+}
+#endif
 
 }
 

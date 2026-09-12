@@ -20,7 +20,6 @@
 #include <cassert>
 #include <cstring>
 #include "moe_utils.cuh"
-using namespace nvcuda::wmma;
 
 // Constants from original kernel
 constexpr int WMMA_M = 16;
@@ -38,6 +37,9 @@ constexpr int N_BLK = WARPS_N * WMMA_N; // 32
 
 // Helper for ceiling division
 #define CEILDIV(A, B) (((A) + (B)-1) / (B))
+
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 700
+using namespace nvcuda::wmma;
 
 // --- GGUF Dequantization Function (Warp-level) ---
 /**
@@ -298,6 +300,24 @@ __global__ void moe_gemm_gguf_prefill_kernel(
         }
     } // end m_base loop
 }
+#else
+template<typename T, int qk, typename block_q_t, int wrap_size>
+__global__ void moe_gemm_gguf_prefill_kernel(
+    const T* __restrict__ input,
+    const uint8_t* __restrict__ weights,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ expert_offsets,
+    const float* __restrict__ topk_weights,
+    float* __restrict__ output,
+    const int num_experts, const int topk,
+    const int32_t size_m,
+    const int32_t size_n,
+    const int32_t size_k,
+    const int gguf_dtype
+) {
+    // Dummy stub for architectures without Tensor Cores (< sm_70)
+}
+#endif
 
 #define LAUNCH_MOE_GGUF_PREFILL(DTYPE) \
     if (gguf_type == 0) {\
