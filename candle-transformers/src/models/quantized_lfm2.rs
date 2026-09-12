@@ -13,8 +13,8 @@ fn get_qtensor<R: std::io::Seek + std::io::Read>(
     names: &[String],
 ) -> Result<candle::quantized::QTensor> {
     for name in names {
-        if let Ok(t) = ct.tensor(reader, name, device) {
-            return Ok(t);
+        if ct.tensor_infos.contains_key(name) {
+            return ct.tensor(reader, name, device);
         }
     }
     bail!("cannot find tensor info for {}", names.join(" | "))
