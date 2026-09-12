@@ -9,17 +9,28 @@ fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=src/compatibility.cuh");
     println!("cargo::rerun-if-changed=src/cuda_utils.cuh");
     println!("cargo::rerun-if-changed=src/binary_op_macros.cuh");
+    println!("cargo::rerun-if-env-changed=CANDLE_CUDA_ARCHS");
 
     // Build for PTX
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let ptx_path = out_dir.join("ptx.rs");
-    let bindings = KernelBuilder::new()
+    let mut builder = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
         .exclude(&["moe_*.cu", "mmvq_gguf.cu", "mmq_*.cu"]) // Exclude statically compiled kernels from ptx build
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
-        .arg("-O3")
-        .build_ptx()?;
+        .arg("-O3");
+
+    if let Ok(archs) = env::var("CANDLE_CUDA_ARCHS") {
+        for arch in archs.split(',') {
+            let arch = arch.trim();
+            if !arch.is_empty() {
+                builder = builder.arg(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            }
+        }
+    }
+
+    let bindings = builder.build_ptx()?;
 
     bindings.write(&ptx_path)?;
 
