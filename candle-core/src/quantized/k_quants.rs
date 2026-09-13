@@ -12,6 +12,7 @@ use half::{bf16, f16, slice::HalfFloatSliceExt};
 pub const QK_K: usize = 256;
 pub const K_SCALE_SIZE: usize = 12;
 
+pub const QK1_0: usize = 128;
 pub const QK4_0: usize = 32;
 pub const QK4_1: usize = 32;
 pub const QK5_0: usize = 32;
@@ -72,6 +73,38 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
 
     /// Generic implementation of the dot product without simd optimizations.
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct BlockQ1_0 {
+    pub d: f16,
+    pub qs: [u8; 16],
+}
+const _: () = assert!(std::mem::size_of::<BlockQ1_0>() == 18);
+
+impl BlockQ1_0 {
+    pub fn zeros() -> Self {
+        Self {
+            d: f16::from_f32(0.0),
+            qs: [0; 16],
+        }
+    }
+
+    pub fn dequantize(&self, out: &mut [f32]) {
+        assert!(
+            out.len() >= QK1_0,
+            "output buffer must have at least {QK1_0} elements"
+        );
+        let d = self.d.to_f32();
+        for (byte_idx, &byte) in self.qs.iter().enumerate() {
+            for bit in 0..8 {
+                let bit_val = (byte >> bit) & 1;
+                let val = if bit_val == 1 { d } else { -d };
+                out[byte_idx * 8 + bit] = val;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +242,68 @@ pub(crate) struct BlockQ4Kx8 {
 }
 #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
 const _: () = assert!(std::mem::size_of::<BlockQ4Kx8>() == 1152);
+
+impl GgmlType for BlockQ1_0 {
+    const DTYPE: GgmlDType = GgmlDType::Q1_0;
+    const BLCK_SIZE: usize = QK1_0;
+    type VecDotType = BlockQ8_0;
+
+    fn to_float(xs: &[Self], ys: &mut [f32]) {
+        let k = ys.len();
+        let qk = Self::BLCK_SIZE;
+        debug_assert!(
+            k.is_multiple_of(qk),
+            "dequantize_row_q1_0: {k} is not divisible by {qk}"
+        );
+
+        let nb = k / qk;
+        for i in 0..nb {
+            xs[i].dequantize(&mut ys[i * qk..(i + 1) * qk]);
+        }
+    }
+
+    fn from_float(xs: &[f32], ys: &mut [Self]) {
+        let qk = Self::BLCK_SIZE;
+        let k = xs.len();
+        debug_assert!(k.is_multiple_of(qk), "{k} is not divisible by {qk}");
+        for (i, ys) in ys.iter_mut().enumerate() {
+            let xs_block = &xs[i * qk..(i + 1) * qk];
+            let sum_abs: f32 = xs_block.iter().map(|x| x.abs()).sum();
+            let d = sum_abs / qk as f32;
+            ys.d = f16::from_f32(d);
+            ys.qs = [0u8; 16];
+            for (j, &x) in xs_block.iter().enumerate() {
+                if x >= 0.0 {
+                    ys.qs[j / 8] |= 1 << (j % 8);
+                }
+            }
+        }
+    }
+
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        let mut sumf = 0.0f32;
+        let mut x_dequant = [0.0f32; QK1_0];
+        let num_blocks = n / QK1_0;
+        for (b, x_block) in xs[..num_blocks].iter().enumerate() {
+            x_block.dequantize(&mut x_dequant);
+            for sub in 0..4 {
+                let y_idx = b * 4 + sub;
+                if y_idx >= ys.len() {
+                    break;
+                }
+                let y_d = ys[y_idx].d.to_f32();
+                for j in 0..QK8_0 {
+                    sumf += x_dequant[sub * QK8_0 + j] * (ys[y_idx].qs[j] as f32) * y_d;
+                }
+            }
+        }
+        sumf
+    }
+}
 
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;

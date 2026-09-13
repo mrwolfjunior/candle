@@ -115,6 +115,10 @@ impl QMetalStorage {
                 let vec: Vec<crate::quantized::BlockQ8K> = read_to_vec(&buffer, block_len);
                 crate::quantized::BlockQ8K::to_float(&vec, &mut out);
             }
+            GgmlDType::Q1_0 => {
+                let vec: Vec<crate::quantized::BlockQ1_0> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockQ1_0::to_float(&vec, &mut out);
+            }
         }
 
         let buffer = self
@@ -497,6 +501,7 @@ impl From<GgmlDType> for candle_metal_kernels::GgmlDType {
             GgmlDType::F16 => candle_metal_kernels::GgmlDType::F16,
             GgmlDType::F32 => candle_metal_kernels::GgmlDType::F32,
             GgmlDType::BF16 => candle_metal_kernels::GgmlDType::BF16,
+            GgmlDType::Q1_0 => panic!("Q1_0 is not supported on metal yet"),
         }
     }
 }

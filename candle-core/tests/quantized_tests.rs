@@ -1117,6 +1117,7 @@ fn ggml_reference_matmul_error(dtype: GgmlDType) -> Result<f32> {
 
         // Not from the ggml repo.
         GgmlDType::Q8K => 0.00065,
+        GgmlDType::Q1_0 => 0.05,
     };
     Ok(err)
 }
@@ -1513,3 +1514,24 @@ test_device!(
     from_data_dequant_matches_canonical_when_caller_passes_cow_owned_cuda,
     from_data_dequant_matches_canonical_when_caller_passes_cow_owned_metal
 );
+
+#[test]
+fn test_q1_0_block_size_and_dequant() {
+    use candle_core::quantized::{k_quants::BlockQ1_0, GgmlDType};
+    assert_eq!(std::mem::size_of::<BlockQ1_0>(), 18);
+    let dtype = GgmlDType::from_u32(41).expect("GgmlDType 41 should be Q1_0");
+    assert_eq!(dtype.block_size(), 128);
+    assert_eq!(dtype.type_size(), 18);
+
+    // Test dequantization of a known block: d = 2.0, qs all 0xAA (alternating bits)
+    let block = BlockQ1_0 {
+        d: half::f16::from_f32(2.0),
+        qs: [0xAA; 16],
+    };
+    let mut out = vec![0f32; 128];
+    block.dequantize(&mut out);
+    // Bit 0 of 0xAA (10101010b) is 0 -> -2.0, Bit 1 is 1 -> +2.0
+    assert_eq!(out[0], -2.0);
+    assert_eq!(out[1], 2.0);
+}
+
