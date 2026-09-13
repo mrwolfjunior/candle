@@ -241,3 +241,160 @@ fn test_qwen35_ssm_snapshot_and_speculative_rollback() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_qwen35_ssm_semantic_retrieval_value_space() -> Result<()> {
+    let device = Device::Cpu;
+    let config = Qwen35Config::bonsai_27b();
+
+    let d_state = config.ssm_d_state; // 128
+    let n_heads = config.ssm_dt_rank; // 48
+
+    // k along basis vector e0 for all 48 heads: [48, 128]
+    let mut k_data = vec![0f32; n_heads * d_state];
+    for h in 0..n_heads {
+        k_data[h * d_state] = 1.0;
+    }
+    let k = Tensor::from_vec(k_data, (n_heads, d_state), &device)?;
+
+    // v along basis vector e1 for all 48 heads: [48, 128] (orthogonal to k)
+    let mut v_data = vec![0f32; n_heads * d_state];
+    for h in 0..n_heads {
+        v_data[h * d_state + 1] = 1.0;
+    }
+    let v = Tensor::from_vec(v_data, (n_heads, d_state), &device)?;
+
+    // Verify k and v are strictly orthogonal: k . v == 0
+    let kv_dot = (k.mul(&v)?).sum_all()?.to_scalar::<f32>()?;
+    assert_eq!(kv_dot, 0.0, "k and v must be orthogonal test vectors");
+
+    // Recurrence step on initial zero state:
+    // sk = S * k = 0
+    // d = (v - sk) = v
+    // S_new = S + d * k^T (outer product in value x key space)
+    let s_init = Tensor::zeros((n_heads, d_state, d_state), DType::F32, &device)?;
+    let k_col = k.unsqueeze(2)?; // [48, 128, 1]
+    let sk = s_init.matmul(&k_col)?.squeeze(2)?; // [48, 128]
+
+    let d = v.sub(&sk)?; // [48, 128] (equals v)
+    let d_col = d.unsqueeze(2)?; // [48, 128, 1]
+    let k_row = k.unsqueeze(1)?; // [48, 1, 128]
+    let dk = d_col.matmul(&k_row)?; // [48, 128, 128]
+    let s_updated = (s_init + dk)?;
+
+    // Query with q = k:
+    // o = S_updated * q = (v * k^T) * k = v * (k^T * k) = v * 1.0 = v
+    let q = k.clone();
+    let q_col = q.unsqueeze(2)?; // [48, 128, 1]
+    let o = s_updated.matmul(&q_col)?.squeeze(2)?; // [48, 128]
+
+    // Verify alignment: o must be perfectly aligned with value space (v), NOT key space (k)
+    let o_dot_v = (o.mul(&v)?).sum(1)?.to_vec1::<f32>()?;
+    let o_dot_k = (o.mul(&k)?).sum(1)?.to_vec1::<f32>()?;
+
+    for h in 0..n_heads {
+        assert!(
+            (o_dot_v[h] - 1.0).abs() < 1e-5,
+            "Head {h} retrieved vector must have dot product ~1.0 with value vector v, got {}",
+            o_dot_v[h]
+        );
+        assert!(
+            o_dot_k[h].abs() < 1e-5,
+            "Head {h} retrieved vector must be orthogonal to key vector k, got {}",
+            o_dot_k[h]
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_qwen35_ssm_layer_semantic_retrieval_end_to_end() -> Result<()> {
+    let device = Device::Cpu;
+    let config = Qwen35Config::bonsai_27b();
+
+    let hidden_size = config.hidden_size;
+    let conv_dim = config.ssm_conv_dim();
+    let inner_size = config.ssm_inner_size;
+    let dt_rank = config.ssm_dt_rank;
+    let d_state = config.ssm_d_state;
+
+    let attn_norm = make_rmsnorm_ones(hidden_size, config.rms_norm_eps, &device)?;
+
+    // QKV projection: [10240, 5120]
+    // Map input index 0 -> Q[head 0, dim 0] (idx 0)
+    // Map input index 1 -> K[head 0, dim 0] (idx 2048)
+    // Map input index 2 -> V[head 0, dim 1] (idx 4096 + 1 = 4097)
+    let mut qkv_w = vec![0f32; conv_dim * hidden_size];
+    qkv_w[0 * hidden_size + 0] = 1.0; // Q = e0 when input has xs[0]
+    qkv_w[2048 * hidden_size + 1] = 1.0; // K = e0 when input has xs[1]
+    qkv_w[4097 * hidden_size + 2] = 1.0; // V = e1 when input has xs[2]
+    let attn_qkv = QMatMul::Tensor(Tensor::from_vec(qkv_w, (conv_dim, hidden_size), &device)?);
+
+    let attn_gate = QMatMul::Tensor(Tensor::ones((inner_size, hidden_size), DType::F32, &device)?);
+
+    // ssm_conv1d: 1.0 on current tap (index 3)
+    let mut conv_w = vec![0f32; conv_dim * config.ssm_conv_kernel];
+    for c in 0..conv_dim {
+        conv_w[c * config.ssm_conv_kernel + 3] = 1.0;
+    }
+    let ssm_conv1d = Tensor::from_vec(conv_w, (conv_dim, config.ssm_conv_kernel), &device)?;
+
+    // ssm_a: 0.0 log decay rates -> decay factor exp(0) = 1.0
+    let ssm_a = Tensor::zeros(dt_rank, DType::F32, &device)?;
+    let ssm_alpha = make_qmatmul_zeros(hidden_size, dt_rank, &device)?;
+
+    // ssm_beta: large positive bias -> sigmoid ~ 1.0
+    let ssm_beta = make_qmatmul_zeros(hidden_size, dt_rank, &device)?;
+    let ssm_dt = Tensor::zeros(dt_rank, DType::F32, &device)?;
+
+    let ssm_norm = make_rmsnorm_ones(d_state, config.rms_norm_eps, &device)?;
+    let ssm_out = make_qmatmul_eye(inner_size, hidden_size, &device)?;
+
+    let mut layer = Qwen35SsmLayer::new(
+        attn_norm,
+        attn_qkv,
+        attn_gate,
+        ssm_conv1d,
+        ssm_a,
+        ssm_alpha,
+        ssm_beta,
+        ssm_dt,
+        ssm_norm,
+        ssm_out,
+        config.clone(),
+    );
+
+    let mut state = Qwen35LayerState::new(&config, &device)?;
+
+    // Step 1: Write token (activates K = e0, V = e1)
+    let mut write_input = vec![0f32; hidden_size];
+    write_input[1] = 1.0; // K = e0
+    write_input[2] = 1.0; // V = e1
+    let xs_write = Tensor::from_vec(write_input, (1, 1, hidden_size), &device)?;
+    let _ = layer.forward_decode(&xs_write, &mut state)?;
+
+    // Step 2: Query token (activates Q = e0)
+    let mut query_input = vec![0f32; hidden_size];
+    query_input[0] = 1.0; // Q = e0
+    let xs_query = Tensor::from_vec(query_input, (1, 1, hidden_size), &device)?;
+    let out = layer.forward_decode(&xs_query, &mut state)?;
+
+    // The output for head 0 must have energy in value index 1 (e1), NOT key index 0 (e0)
+    let out_vec = out.flatten_all()?.to_vec1::<f32>()?;
+    let val_energy = out_vec[1].abs();
+    let key_energy = out_vec[0].abs();
+
+    assert!(
+        val_energy > 0.01,
+        "Retrieved output must have significant energy along value coordinate 1, got {}",
+        val_energy
+    );
+    assert!(
+        key_energy < 1e-4,
+        "Retrieved output must have zero energy along key coordinate 0, got {}",
+        key_energy
+    );
+
+    Ok(())
+}

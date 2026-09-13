@@ -241,7 +241,7 @@ impl Qwen35SsmLayer {
         let conv_input = Tensor::cat(&[&state.conv_state, &qkv_conv_dtype], 1)?; // [1, 4, 10240]
         state.conv_state = conv_input.narrow(1, 1, self.config.ssm_conv_len())?.contiguous()?;
 
-        let conv_in = conv_input.squeeze(0)?.t()?.to_dtype(self.ssm_conv1d.dtype())?; // [10240, 4]
+        let conv_in = conv_input.squeeze(0)?.t()?.contiguous()?.to_dtype(self.ssm_conv1d.dtype())?; // [10240, 4]
         let conv_out = (conv_in * &self.ssm_conv1d)?.sum(1)?; // [10240]
         let conv_out_silu = candle_nn::ops::silu(&conv_out)?; // [10240]
 
@@ -281,10 +281,11 @@ impl Qwen35SsmLayer {
         let beta_col = beta.reshape((n_v_heads, 1))?; // [48, 1]
         let d = (v.sub(&sk)?).broadcast_mul(&beta_col)?; // [48, 128]
 
-        // Update: s_h = s_h + (k_h (x) d_h)
-        let d_row = d.unsqueeze(1)?; // [48, 1, 128]
-        let kd = k_col.matmul(&d_row)?; // [48, 128, 128]
-        s = (s + kd)?;
+        // Update: s_h = s_h + (d_h (x) k_h) = s_h + d_h * k_h^T
+        let d_col = d.unsqueeze(2)?; // [48, 128, 1]
+        let k_row = k_exp.unsqueeze(1)?; // [48, 1, 128]
+        let dk = d_col.matmul(&k_row)?; // [48, 128, 128]
+        s = (s + dk)?;
 
         // Head Output: o_h = s_h * q_h
         let q_col = q_exp.unsqueeze(2)?; // [48, 128, 1]
