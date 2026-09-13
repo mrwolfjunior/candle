@@ -466,19 +466,38 @@ impl ModelWeights {
         device: &Device,
     ) -> Result<Self> {
         let mut gg = Gguf::new(ct, reader, device.clone());
-        let md_get = |s: &str| match gg.metadata().get(s) {
-            None => candle::bail!("cannot find {s} in metadata"),
-            Some(v) => Ok(v),
+        let arch = gg
+            .metadata()
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok())
+            .map(|s| s.as_str())
+            .unwrap_or("qwen3");
+
+        let md_get = |k: &str| {
+            let k_arch = format!("{arch}.{k}");
+            let k_q3 = format!("qwen3.{k}");
+            let k_q2 = format!("qwen2.{k}");
+            gg.metadata()
+                .get(&k_arch)
+                .or_else(|| gg.metadata().get(&k_q3))
+                .or_else(|| gg.metadata().get(&k_q2))
+                .ok_or_else(|| candle::Error::Msg(format!("cannot find {k} ({k_arch}) in metadata")))
         };
 
-        let num_attention_heads = md_get("qwen3.attention.head_count")?.to_u32()? as usize;
-        let num_kv_heads = md_get("qwen3.attention.head_count_kv")?.to_u32()? as usize;
-        let head_dim = md_get("qwen3.attention.key_length")?.to_u32()? as usize;
-        let num_layers = md_get("qwen3.block_count")?.to_u32()? as usize;
-        let hidden_size = md_get("qwen3.embedding_length")?.to_u32()? as usize;
-        let max_position_embeddings = md_get("qwen3.context_length")?.to_u32()? as usize;
-        let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
-        let rope_freq_base = md_get("qwen3.rope.freq_base")?.to_f32()? as f64;
+        let num_attention_heads = md_get("attention.head_count")?.to_u32()? as usize;
+        let num_kv_heads = md_get("attention.head_count_kv")?.to_u32()? as usize;
+        let hidden_size = md_get("embedding_length")?.to_u32()? as usize;
+        let head_dim = md_get("attention.key_length")
+            .and_then(|v| v.to_u32().map_err(candle::Error::msg))
+            .map(|v| v as usize)
+            .unwrap_or(hidden_size / num_attention_heads);
+        let num_layers = md_get("block_count")?.to_u32()? as usize;
+        let max_position_embeddings = md_get("context_length")?.to_u32()? as usize;
+        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
+        let rope_freq_base = md_get("rope.freq_base")
+            .and_then(|v| v.to_f32().map_err(candle::Error::msg))
+            .map(|v| v as f64)
+            .unwrap_or(1_000_000.0);
 
         let dtype = match gg.metadata().get("general.dtype") {
             Some(v) => match v.to_u32() {

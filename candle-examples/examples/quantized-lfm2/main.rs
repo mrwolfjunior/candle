@@ -58,6 +58,10 @@ struct Args {
     #[arg(long)]
     prompt: Option<String>,
 
+    /// Read the initial prompt from a file.
+    #[arg(long)]
+    prompt_file: Option<std::path::PathBuf>,
+
     /// The number of tokens to sample (including the first token after the prompt).
     #[arg(short = 'n', long, default_value_t = 512)]
     sample_len: usize,
@@ -223,10 +227,15 @@ fn main() -> Result<()> {
     println!("model ready");
 
     let tokenizer = args.tokenizer(&model_path)?;
+    let prompt_text = if let Some(path) = &args.prompt_file {
+        std::fs::read_to_string(path)?
+    } else {
+        args.prompt.clone().unwrap_or_else(|| DEFAULT_PROMPT.to_string())
+    };
     let mut tos = TokenOutputStream::new(tokenizer);
     let mut tokens = tos
         .tokenizer()
-        .encode(args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT), true)
+        .encode(prompt_text.as_str(), true)
         .map_err(anyhow::Error::msg)?
         .get_ids()
         .to_vec();
@@ -257,9 +266,12 @@ fn main() -> Result<()> {
         LogitsProcessor::from_sampling(args.seed, sampling)
     };
 
-    println!("Starting the inference loop:");
-    let prompt_str = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
-    print!("{prompt_str}");
+    println!("Starting the inference loop (prompt length: {} tokens):", tokens.len());
+    if prompt_text.len() > 300 {
+        println!("{}[... truncated {} chars]", &prompt_text[..200], prompt_text.len() - 200);
+    } else {
+        print!("{prompt_text}");
+    }
     std::io::stdout().flush()?;
 
     let start_prompt_processing = std::time::Instant::now();

@@ -49,6 +49,10 @@ struct Args {
     #[arg(long)]
     prompt: Option<String>,
 
+    /// Read the initial prompt from a file.
+    #[arg(long)]
+    prompt_file: Option<std::path::PathBuf>,
+
     /// The length of the sample to generate (in tokens).
     #[arg(short = 'n', long, default_value_t = 1000)]
     sample_len: usize,
@@ -213,13 +217,18 @@ fn main() -> anyhow::Result<()> {
 
     let tokenizer = args.tokenizer()?;
     let mut tos = TokenOutputStream::new(tokenizer);
-    let prompt_str = args
-        .prompt
-        .clone()
-        .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    let prompt_content = if let Some(path) = &args.prompt_file {
+        std::fs::read_to_string(path)?
+    } else {
+        args.prompt.clone().unwrap_or_else(|| DEFAULT_PROMPT.to_string())
+    };
 
-    let prompt_str = format!("<|im_start|>user\n{prompt_str}<|im_end|>\n<|im_start|>assistant\n");
-    print!("formatted prompt: {}", prompt_str);
+    let prompt_str = format!("<|im_start|>user\n{prompt_content}<|im_end|>\n<|im_start|>assistant\n");
+    if prompt_str.len() > 300 {
+        println!("formatted prompt: {}[... truncated {} chars]", &prompt_str[..200], prompt_str.len() - 200);
+    } else {
+        print!("formatted prompt: {}", prompt_str);
+    }
 
     let tokens = tos
         .tokenizer()
