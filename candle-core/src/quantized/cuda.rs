@@ -108,6 +108,15 @@ fn dequantize_f32(
     elem_count: usize,
     dev: &CudaDevice,
 ) -> Result<CudaStorage> {
+    dequantize_f32_view(&data.inner.slice(..data.len), dtype, elem_count, dev)
+}
+
+fn dequantize_f32_view(
+    data: &CudaView<u8>,
+    dtype: GgmlDType,
+    elem_count: usize,
+    dev: &CudaDevice,
+) -> Result<CudaStorage> {
     let nb = elem_count.div_ceil(256);
     let (kernel_name, is_k, block_dim, num_blocks) = match dtype {
         GgmlDType::Q4_0 => ("dequantize_block_q4_0_f32", false, 32, nb),
@@ -136,8 +145,6 @@ fn dequantize_f32(
     };
     let func = dev.get_or_load_func(kernel_name, &candle_kernels::QUANTIZED)?;
     let dst = unsafe { dev.alloc::<f32>(elem_count)? };
-    // See e.g.
-    // https://github.com/ggerganov/llama.cpp/blob/cbbd1efa06f8c09f9dff58ff9d9af509cc4c152b/ggml-cuda.cu#L7270
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (num_blocks as u32, 1, 1),
         block_dim: (block_dim as u32, 1, 1),
@@ -146,7 +153,7 @@ fn dequantize_f32(
 
     if is_k {
         let mut builder = func.builder();
-        builder.arg(&data.inner);
+        builder.arg(data);
         builder.arg(&dst);
         unsafe { builder.launch(cfg) }.w()?;
     } else {
@@ -155,7 +162,7 @@ fn dequantize_f32(
             _ => elem_count / 32,
         };
         let mut builder = func.builder();
-        builder.arg(&data.inner);
+        builder.arg(data);
         builder.arg(&dst);
         barg!(builder, nb32 as i32);
         unsafe { builder.launch(cfg) }.w()?;
@@ -165,6 +172,15 @@ fn dequantize_f32(
 
 fn dequantize_f16(
     data: &PaddedCudaSlice,
+    dtype: GgmlDType,
+    elem_count: usize,
+    dev: &CudaDevice,
+) -> Result<CudaStorage> {
+    dequantize_f16_view(&data.inner.slice(..data.len), dtype, elem_count, dev)
+}
+
+fn dequantize_f16_view(
+    data: &CudaView<u8>,
     dtype: GgmlDType,
     elem_count: usize,
     dev: &CudaDevice,
@@ -197,8 +213,6 @@ fn dequantize_f16(
     };
     let func = dev.get_or_load_func(kernel_name, &candle_kernels::QUANTIZED)?;
     let dst = unsafe { dev.alloc::<f16>(elem_count)? };
-    // See e.g.
-    // https://github.com/ggerganov/llama.cpp/blob/cbbd1efa06f8c09f9dff58ff9d9af509cc4c152b/ggml-cuda.cu#L7270
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (num_blocks as u32, 1, 1),
         block_dim: (block_dim as u32, 1, 1),
@@ -207,7 +221,7 @@ fn dequantize_f16(
 
     if is_k {
         let mut builder = func.builder();
-        builder.arg(&data.inner);
+        builder.arg(data);
         builder.arg(&dst);
         unsafe { builder.launch(cfg) }.w()?;
     } else {
@@ -216,7 +230,7 @@ fn dequantize_f16(
             _ => elem_count / 32,
         };
         let mut builder = func.builder();
-        builder.arg(&data.inner);
+        builder.arg(data);
         builder.arg(&dst);
         barg!(builder, nb32 as i32);
         unsafe { builder.launch(cfg) }.w()?;
@@ -961,6 +975,71 @@ impl QCudaStorage {
         };
         if k2 != k {
             crate::bail!("mismatch on matmul dim {self_shape:?} {:?}", layout.shape())
+        }
+
+        let chunk_n = 16384;
+        if n > chunk_n
+            && b == 1
+            && (FORCE_DMMV.load(std::sync::atomic::Ordering::Relaxed)
+                || self.dtype == GgmlDType::Q1_0)
+        {
+            let row_bytes = k * self.dtype.type_size() / self.dtype.block_size();
+            let out = match &storage.slice {
+                crate::cuda_backend::CudaStorageSlice::F16(_) => {
+                    let total_out_elems = b * m * n;
+                    let mut combined = unsafe { self.device.alloc::<f16>(total_out_elems)? };
+                    let mut current_n = 0;
+                    while current_n < n {
+                        let this_n = (n - current_n).min(chunk_n);
+                        let byte_start = current_n * row_bytes;
+                        let byte_end = (current_n + this_n) * row_bytes;
+                        let view = self.data.inner.slice(byte_start..byte_end);
+                        let this_rhs_l = crate::Layout::new((k, this_n).into(), vec![1, k], 0).broadcast_as((b, k, this_n))?;
+                        let chunk_data = dequantize_f16_view(&view, self.dtype, this_n * k, self.device())?;
+                        let chunk_out = storage.matmul(&chunk_data, (b, m, this_n, k), layout, &this_rhs_l)?;
+                        let chunk_slice = chunk_out.as_cuda_slice::<f16>()?;
+                        for row_idx in 0..m {
+                            let src_start = row_idx * this_n;
+                            let dst_start = row_idx * n + current_n;
+                            self.device.memcpy_dtod(
+                                &chunk_slice.slice(src_start..src_start + this_n),
+                                &mut combined.slice_mut(dst_start..dst_start + this_n),
+                            )?;
+                        }
+                        current_n += this_n;
+                    }
+                    CudaStorage::wrap_cuda_slice(combined, self.device.clone())
+                }
+                _ => {
+                    let total_out_elems = b * m * n;
+                    let mut combined = unsafe { self.device.alloc::<f32>(total_out_elems)? };
+                    let mut current_n = 0;
+                    while current_n < n {
+                        let this_n = (n - current_n).min(chunk_n);
+                        let byte_start = current_n * row_bytes;
+                        let byte_end = (current_n + this_n) * row_bytes;
+                        let view = self.data.inner.slice(byte_start..byte_end);
+                        let this_rhs_l = crate::Layout::new((k, this_n).into(), vec![1, k], 0).broadcast_as((b, k, this_n))?;
+                        let chunk_data = dequantize_f32_view(&view, self.dtype, this_n * k, self.device())?;
+                        let chunk_out = storage.matmul(&chunk_data, (b, m, this_n, k), layout, &this_rhs_l)?;
+                        let chunk_slice = chunk_out.as_cuda_slice::<f32>()?;
+                        for row_idx in 0..m {
+                            let src_start = row_idx * this_n;
+                            let dst_start = row_idx * n + current_n;
+                            self.device.memcpy_dtod(
+                                &chunk_slice.slice(src_start..src_start + this_n),
+                                &mut combined.slice_mut(dst_start..dst_start + this_n),
+                            )?;
+                        }
+                        current_n += this_n;
+                    }
+                    CudaStorage::wrap_cuda_slice(combined, self.device.clone())
+                }
+            };
+            let mut out_shape = layout.shape().dims().to_vec();
+            out_shape.pop();
+            out_shape.push(n);
+            return Ok((out, out_shape.into()));
         }
 
         let out = if FORCE_DMMV.load(std::sync::atomic::Ordering::Relaxed)
