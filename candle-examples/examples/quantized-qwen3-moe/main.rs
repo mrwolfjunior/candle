@@ -223,7 +223,8 @@ fn main() -> anyhow::Result<()> {
 
     let dtype = match args.dtype.as_str() {
         "bf16" => DType::BF16,
-        "f16" => DType::F16, // Used for V100
+        "f16" => DType::F16,
+        "f32" => DType::F32,
         _ => {
             panic!("Not supported dtype!")
         }

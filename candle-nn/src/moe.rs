@@ -253,9 +253,17 @@ pub fn moe_gemm_gguf(
         use candle::op::BackpropOp;
         use core::ffi::c_void;
 
-        assert!(size_k % 8 == 0, "size_k must divisible by 8");
+        let cu_device = dev.cuda_stream().context().cu_device();
+        let major = unsafe {
+            candle::cuda_backend::cudarc::driver::result::device::get_attribute(
+                cu_device,
+                candle::cuda_backend::cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+            )
+        }
+        .unwrap_or(8);
+
         unsafe {
-            if is_prefill {
+            if is_prefill && major >= 7 {
                 let input = input.to_dtype(dtype)?;
                 let (input, _) = input.storage_and_layout();
                 let (input_ptr, input_dtype) = match &*input {
@@ -287,6 +295,7 @@ pub fn moe_gemm_gguf(
                     stream,
                 );
             } else {
+                let input = input.to_dtype(DType::F32)?;
                 let (input, _) = input.storage_and_layout();
                 let input = match &*input {
                     candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
