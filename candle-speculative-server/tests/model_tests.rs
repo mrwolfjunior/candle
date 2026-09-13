@@ -103,6 +103,7 @@ fn test_quantized_qwen2_rollback_and_reset() -> candle::Result<()> {
         device,
         cos,
         sin,
+        total_tokens_seen: 5,
     };
 
     assert_eq!(model.current_kv_pos(), 5);

@@ -81,19 +81,22 @@ Pascal GPUs (`sm_61`) have architectural constraints that break modern MoE and t
 
 In addition to the 0.6B draft model, this server implements **Super-Draft Speculation** using **Bonsai-27B** (`GGML_TYPE_Q1_0`, 1-bit / 1.58-bit ternary quantization). 
 
-### Super-Draft Architecture & Memory Sizing
-- **Draft Engine (RTX 2070 8GB)**:
+### Super-Draft Architecture & Physical VRAM Budget
+- **Draft Engine (RTX 2070 8GB, `cuda:0`)**:
   - Model weights: `Bonsai-27B-Q1_0.gguf` (**3.6 GB**, 18 bytes / 128 elements).
   - KV Cache: **8,192-token Rolling Window** in FP16 (~2.0 GB).
-  - Total Draft VRAM: **~5.6 GB** (leaving >2.4 GB headroom on the 8 GB RTX 2070).
-- **Target Verifier (Tesla P40 24GB)**:
-  - Model weights: Quantized 27B/30B target (~16–18.5 GB).
-  - Full resident in-place KV cache scaled up to **64,000 tokens** resident in VRAM.
+  - Total Draft VRAM: **~5.6 GB** (leaving >2.4 GB headroom on the 8 GB card).
+- **Target Verifier (Tesla P40 24GB, `cuda:1`)**:
+  - **Weights**: Full 27B/30B target model (`Q4_K_M` ~16.0–18.55 GB).
+  - **FP16 Resident Limits on 24 GB**:
+    - **8,192 tokens**: FP16 KV = 2.15 GB $\rightarrow$ **~18.95 GB total** (>5.0 GB headroom).
+    - **16,384 tokens**: FP16 KV = 4.29 GB $\rightarrow$ **~21.09 GB total** (~2.9 GB headroom).
+    - *Note on 64k Context*: In uncompressed FP16, a 64k context target cache on a 64-layer 27B model occupies **16.78 GB**. Concurrently loading 16 GB model weights + 16.78 GB FP16 KV cache equals **32.78 GB**, exceeding the 24 GB VRAM of a single card. Therefore, **16,384 tokens is the native FP16 residency limit** for real 27B weights on a 24 GB card. Scaling 64,000 resident tokens on a 24 GB card requires either quantized KV caching (INT8: 8.39 GB, INT4: 4.19 GB $\rightarrow$ ~20.2 GB total) or multi-tier host RAM streaming (Phase 2).
 - **Prefill Scaling**: Chunked prefill (2,048 tokens/chunk) completely eliminates quadratic memory spikes during prompt ingestion.
-- **Rollback Mechanics**: $O(1)$ in-place pointer rollback with window-safe boundary clamping.
+- **Rollback Mechanics**: $O(1)$ in-place tail discard (`discard_tail`) and separate absolute sequence length tracking for RoPE ensure exact synchronization without token drops or window-boundary drift.
 
 ### Empirical Benchmarks on Physical Hardware
-*Measured directly on physical dual-GPU hardware (`RTX 2070` cuda:0 + `Tesla P40` cuda:1, Xeon Broadwell 12C/24T, 31GB RAM) using `./target/release/examples/benchmark_superdraft` with $\gamma = 4$, simulated divergence exercising rollback, and FP16 KV cache on CUDA:*
+*Measured directly on physical dual-GPU hardware (`RTX 2070` cuda:0 + `Tesla P40` cuda:1, Xeon Broadwell 12C/24T, 31GB RAM) using `./target/release/examples/benchmark_superdraft` with `--mock`, $\gamma = 4$, simulated divergence exercising rollback, and FP16 KV cache on CUDA:*
 
 | Context Depth | Prefill Throughput | Speculative Decode | Acceptance ($\alpha$) | Toks / Step ($\tau$) | Draft Latency | Target Latency | Target / Draft | KV Cache Size (Target) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -107,8 +110,7 @@ In addition to the 0.6B draft model, this server implements **Super-Draft Specul
 #### Empirical Observations & Key Takeaways
 1. **Draft Latency Invariance via Rolling Window**: Due to the fixed 8,192-token rolling window on the RTX 2070, draft generation latency remains completely invariant (~1.64–1.90 ms) regardless of whether total context is 1,024 or 64,000 tokens.
 2. **Target Verification Scaling**: Target verification latency scales directly with context depth (0.38 ms at 1k $\rightarrow$ 3.84 ms at 64k). At 64k tokens, target verification time exceeds draft proposal time (Target/Draft ratio 2.02x), marking the crossover where extreme-context verification dominates pipeline throughput.
-3. **KV Cache Memory Footprint**: In FP16, a 64k context target cache on a 64-layer 27B model occupies **16.78 GB**, safely fitting within the 24 GB VRAM of the Tesla P40 (in contrast to FP32 which would require 33.56 GB and exceed card capacity).
-4. **Architectural Scaling vs. Full-Weight Deployment**: This empirical benchmark validates the dual-GPU pipeline mechanics, chunked prefill, window-aligned causal masking, and rollback synchronization across physical PCIe lanes up to 64k context without quadratic memory explosion. Real-weight inference for `Bonsai-27B` (`qwen35` GGUF architecture) additionally requires hybrid Mamba-2 SSM recurrent kernels for the `blk.N.ssm_*` layers alongside the GGML Type 41 (`Q1_0`) dequantizer implemented in Candle.
+3. **Architectural Pipeline Verification**: This empirical benchmark validates the dual-GPU pipeline mechanics, chunked prefill, window-aligned causal masking, and rollback synchronization across physical PCIe lanes up to 64,000 tokens without quadratic memory explosion or CUDA faults. Real-weight inference for `Bonsai-27B` (`qwen35` GGUF architecture) additionally requires hybrid Mamba-2 SSM recurrent kernels for the `blk.N.ssm_*` layers alongside the GGML Type 41 (`Q1_0`) dequantizer implemented in Candle.
 
 ### Reproducing the 64k Super-Draft Benchmark
 To run the benchmark suite across all 6 context depths on physical hardware:

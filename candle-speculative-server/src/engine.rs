@@ -193,23 +193,16 @@ impl SuperDraftSpeculativeEngine {
         let k = result.num_accepted_draft;
         if k < self.gamma {
             // Discrepancy at index k < gamma:
-            // Target rolls back to start_pos + k + 1 (the position right after target correction token)
-            let target_rollback_pos = start_pos + k + 1;
-            self.target_verifier.rollback_kv(target_rollback_pos)?;
-
-            // Draft proposed gamma candidate tokens during propose().
-            // Exactly (gamma - k) candidate tokens were rejected.
-            // Discard the (gamma - k) rejected tokens from draft's rolling KV cache:
-            let draft_discard_count = self.gamma - k;
-            let draft_rollback_pos = self.draft_bonsai.current_kv_pos().saturating_sub(draft_discard_count);
-            self.draft_bonsai.rollback_kv(draft_rollback_pos)?;
-
-            // Ingest target's correction token into draft cache so both models remain synchronized
-            let t_corr_start = std::time::Instant::now();
-            let correction_token = result.accepted_tokens[k];
-            let input_tensor = Tensor::new(&[[correction_token]], &self.draft_bonsai.model.device)?;
-            let _ = self.draft_bonsai.forward(&input_tensor)?;
-            self.draft_time += t_corr_start.elapsed();
+            // Rollback both models to start_pos + k + 1.
+            // Draft proposed gamma tokens, and appended [current_token, d_0, ..., d_{gamma-2}] (gamma tokens).
+            // Exactly k draft tokens were accepted: d_0, ..., d_{k-1}.
+            // Rolling back to start_pos + k + 1 discards the (gamma - k - 1) rejected draft tokens.
+            // Both models now contain [current_token, d_0, ..., d_{k-1}].
+            // The target's correction token (result.accepted_tokens[k]) is returned to the caller
+            // and will be ingested as current_token on the subsequent step.
+            let rollback_pos = start_pos + k + 1;
+            self.draft_bonsai.rollback_kv(rollback_pos)?;
+            self.target_verifier.rollback_kv(rollback_pos)?;
         } else {
             // All gamma draft tokens accepted!
             // Append the final accepted draft token into draft's cache to synchronize

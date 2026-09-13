@@ -218,6 +218,10 @@ impl InPlaceKvCache {
         Ok(())
     }
 
+    pub fn discard_tail(&mut self, count: usize) {
+        self.current_pos = self.current_pos.saturating_sub(count);
+    }
+
     pub fn reset(&mut self) {
         self.current_pos = 0;
     }

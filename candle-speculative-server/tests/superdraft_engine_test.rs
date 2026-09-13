@@ -101,6 +101,7 @@ fn create_deterministic_model(
         device: device.clone(),
         cos,
         sin,
+        total_tokens_seen: 0,
     })
 }
 
@@ -418,12 +419,13 @@ fn test_superdraft_engine_divergence_when_draft_rolling_window_full() -> candle:
 
     let mut engine = SuperDraftSpeculativeEngine::new(draft_bonsai, target_verifier, gamma);
 
-    // Prefill 10 tokens: target is at 10, draft rolling window is capped at 8!
+    // Prefill 10 tokens: both are at sequence position 10, draft rolling buffer is capped at window_size 8
     let prompt: Vec<u32> = (1..=10).collect();
     let current_token = engine.prefill(&prompt)?;
     assert_eq!(current_token, 11);
     assert_eq!(engine.target_verifier.current_kv_pos(), 10);
-    assert_eq!(engine.draft_bonsai.current_kv_pos(), window_size);
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), 10);
+    assert_eq!(engine.draft_bonsai.kv_buffer_len(), window_size);
 
     // Step starting from token 11:
     // Draft proposes [12, 13, 14, 15]
@@ -432,11 +434,103 @@ fn test_superdraft_engine_divergence_when_draft_rolling_window_full() -> candle:
     assert_eq!(res.num_accepted_draft, 1);
     assert_eq!(res.accepted_tokens, vec![12, 9]);
 
-    // Target accepted 1 draft token + 1 correction token -> advances from 10 to 12
+    // Target accepted 1 draft token (12) + emitted correction token (9)
+    // Both models rolled back to sequence position 12 (holding prompt 1..10 + draft token 11 + token 12)
     assert_eq!(engine.target_verifier.current_kv_pos(), 12);
-    // Draft rolled back the (gamma - k = 4 - 1 = 3) rejected tokens (8 - 3 = 5),
-    // then ingested target's correction token (5 + 1 = 6).
-    assert_eq!(engine.draft_bonsai.current_kv_pos(), 6);
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), 12);
+    assert_eq!(engine.draft_bonsai.kv_buffer_len(), 6);
+
+    // Execute subsequent step starting with correction token 9:
+    // Both models ingest 9 at position 12 without token duplication!
+    let next_res = engine.speculative_step(9)?;
+    assert_eq!(engine.target_verifier.current_kv_pos() >= 13, true);
+    assert_eq!(engine.draft_bonsai.current_kv_pos() >= 13, true);
+    assert!(!next_res.accepted_tokens.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_superdraft_engine_multi_step_divergence_no_duplication_and_rope_monotonicity() -> candle::Result<()> {
+    let device = Device::Cpu;
+    let vocab_size = 32;
+    let hidden_size = 32;
+    let num_heads = 2;
+    let num_kv_heads = 2;
+    let max_seq_len = 64;
+    let window_size = 8;
+    let gamma = 4;
+
+    // Draft predictably transitions t -> t + 1 for all t
+    let mut draft_transitions = Vec::new();
+    for i in 1..31 {
+        draft_transitions.push((i, i + 1));
+    }
+    let draft_qwen = create_deterministic_model(
+        &device,
+        vocab_size,
+        hidden_size,
+        num_heads,
+        num_kv_heads,
+        max_seq_len,
+        &draft_transitions,
+    )?;
+    let draft_bonsai = Bonsai27BWithKv::new(draft_qwen, window_size);
+
+    // Target agrees on 1..8, but at token 8 it diverges: predicts 20 instead of 9!
+    // Then at token 20 it predicts 21.
+    let mut target_transitions = draft_transitions.clone();
+    for t in &mut target_transitions {
+        if t.0 == 8 {
+            t.1 = 20;
+        }
+    }
+    target_transitions.push((20, 21));
+    target_transitions.push((21, 22));
+
+    let target_verifier = create_deterministic_model(
+        &device,
+        vocab_size,
+        hidden_size,
+        num_heads,
+        num_kv_heads,
+        max_seq_len,
+        &target_transitions,
+    )?;
+
+    let mut engine = SuperDraftSpeculativeEngine::new(draft_bonsai, target_verifier, gamma);
+
+    // Step 1: start at token 1
+    // Draft proposes [2, 3, 4, 5]
+    // Target matches all 4 and emits bonus token 6
+    let res1 = engine.speculative_step(1)?;
+    assert_eq!(res1.num_accepted_draft, 4);
+    assert_eq!(res1.accepted_tokens, vec![2, 3, 4, 5, 6]);
+    assert_eq!(res1.bonus_token, Some(6));
+    assert_eq!(engine.target_verifier.current_kv_pos(), 5);
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), 5);
+
+    // Step 2: continue from bonus token 6
+    // Draft proposes [7, 8, 9, 10]
+    // Target checks: 6->7, 7->8, 8->20! -> divergence at k = 2 (token 8 predicts 20, draft had 9)!
+    // Accepted tokens: [7, 8, 20]
+    let res2 = engine.speculative_step(6)?;
+    assert_eq!(res2.num_accepted_draft, 2);
+    assert_eq!(res2.accepted_tokens, vec![7, 8, 20]);
+    assert_eq!(res2.bonus_token, None);
+
+    // Both models roll back to position 5 + 2 + 1 = 8 (holding prompt 1 + [2,3,4,5,6] + [7,8])
+    assert_eq!(engine.target_verifier.current_kv_pos(), 8);
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), 8);
+
+    // Step 3: continue from correction token 20
+    // Neither model should have duplicate token 20 in their KV cache!
+    // Draft proposes from 20 -> [21, 22, 23, 24]
+    // Target checks: 20->21, 21->22 ...
+    let res3 = engine.speculative_step(20)?;
+    assert_eq!(res3.accepted_tokens[0], 21);
+    assert_eq!(engine.target_verifier.current_kv_pos() >= 9, true);
+    assert_eq!(engine.draft_bonsai.current_kv_pos() >= 9, true);
 
     Ok(())
 }

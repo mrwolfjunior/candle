@@ -144,6 +144,7 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
         sin,
         config,
         device: device.clone(),
+        total_tokens_seen: 0,
     })
 }
 

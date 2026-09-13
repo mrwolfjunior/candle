@@ -224,6 +224,7 @@ fn test_bonsai_rolling_window_kv_logic() -> candle::Result<()> {
         device: device.clone(),
         cos,
         sin,
+        total_tokens_seen: 0,
     };
 
     let mut bonsai = Bonsai27BWithKv::new(model, rolling_window);
@@ -259,7 +260,8 @@ fn test_bonsai_rolling_window_kv_logic() -> candle::Result<()> {
     // Evicts oldest 2 tokens (1.0, 2.0). Cache should now hold 3.0..=10.0 (8 tokens)
     let (k3, v3) = make_kv(9.0, 2)?;
     bonsai.append_kv(&k3, &v3)?;
-    assert_eq!(bonsai.current_kv_pos(), 8);
+    assert_eq!(bonsai.current_kv_pos(), 10);
+    assert_eq!(bonsai.kv_buffer_len(), 8);
 
     // Inspect KV cache contents via view
     let (k_view, _) = bonsai.model.layers[0].kv_cache.current_view()?;
@@ -272,8 +274,12 @@ fn test_bonsai_rolling_window_kv_logic() -> candle::Result<()> {
     assert_eq!(last_token[0], 10.0);
 
     // Test rollback within window
+    // Rolled back from 10 to 6 (discarded 4 tokens: 10, 9, 8, 7).
+    // The rolling cache originally held tokens 3..=10 (8 tokens).
+    // After discarding the 4 tail tokens, it correctly retains tokens 3..=6 (4 tokens).
     bonsai.rollback_kv(6)?;
     assert_eq!(bonsai.current_kv_pos(), 6);
+    assert_eq!(bonsai.kv_buffer_len(), 4);
 
     // Test reset
     bonsai.reset_kv();

@@ -246,9 +246,9 @@ impl Layer {
         cos: &Tensor,
         sin: &Tensor,
         rolling_window: Option<usize>,
+        index_pos: usize,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, n_embd) = xs.dims3()?;
-        let index_pos = self.kv_cache.current_pos();
 
         let norm_xs = self.attention_norm.forward(xs)?;
         let q = self.attention_wq.forward(&norm_xs)?;
@@ -348,13 +348,22 @@ pub struct QuantizedQwen2WithKv {
     pub device: Device,
     pub cos: Tensor,
     pub sin: Tensor,
+    pub total_tokens_seen: usize,
 }
 
 impl QuantizedQwen2WithKv {
     pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
-        for layer in &mut self.layers {
-            layer.kv_cache.rollback(pos)?;
+        if pos > self.total_tokens_seen {
+            return Err(candle::Error::Msg(format!(
+                "Cannot rollback to position {pos} greater than current pos {}",
+                self.total_tokens_seen
+            )));
         }
+        let count = self.total_tokens_seen - pos;
+        for layer in &mut self.layers {
+            layer.kv_cache.discard_tail(count);
+        }
+        self.total_tokens_seen = pos;
         Ok(())
     }
 
@@ -362,23 +371,32 @@ impl QuantizedQwen2WithKv {
         for layer in &mut self.layers {
             layer.kv_cache.reset();
         }
+        self.total_tokens_seen = 0;
     }
 
     pub fn current_kv_pos(&self) -> usize {
+        self.total_tokens_seen
+    }
+
+    pub fn kv_buffer_len(&self) -> usize {
         self.layers.first().map(|l| l.kv_cache.current_pos()).unwrap_or(0)
     }
 
     pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
+        let seq_len = k.dim(2)?;
         for layer in &mut self.layers {
             layer.kv_cache.append(k, v)?;
         }
+        self.total_tokens_seen += seq_len;
         Ok(())
     }
 
     pub fn append_kv_rolling(&mut self, k: &Tensor, v: &Tensor, window: usize) -> Result<()> {
+        let seq_len = k.dim(2)?;
         for layer in &mut self.layers {
             layer.kv_cache.append_rolling(k, v, window)?;
         }
+        self.total_tokens_seen += seq_len;
         Ok(())
     }
 
@@ -391,12 +409,15 @@ impl QuantizedQwen2WithKv {
         input_ids: &Tensor,
         rolling_window: Option<usize>,
     ) -> Result<Tensor> {
-        let (_b_sz, _seq_len) = input_ids.dims2()?;
+        let (_b_sz, seq_len) = input_ids.dims2()?;
+        let index_pos = self.total_tokens_seen;
         let mut xs = self.tok_embeddings.forward(input_ids)?;
 
         for layer in &mut self.layers {
-            xs = layer.forward(&xs, &self.cos, &self.sin, rolling_window)?;
+            xs = layer.forward(&xs, &self.cos, &self.sin, rolling_window, index_pos)?;
         }
+
+        self.total_tokens_seen += seq_len;
 
         let xs = self.norm.forward(&xs)?;
         let logits = self.output.forward(&xs)?;
@@ -419,6 +440,7 @@ impl QuantizedQwen2WithKv {
     ) -> Result<Self> {
         let config = Config::from_gguf(ct)?;
         let head_dim = config.head_dim();
+        let rope_max_len = config.max_position_embeddings.max(65536);
         let kv_max_len = max_seq_len
             .map(|m| m + 1024)
             .unwrap_or(config.max_position_embeddings);
@@ -437,7 +459,7 @@ impl QuantizedQwen2WithKv {
             _ => QMatMul::from_qtensor(ct.tensor(reader, "token_embd.weight", device)?)?,
         };
 
-        let (cos, sin) = precompute_freqs_cis(head_dim, config.rope_theta, kv_max_len, device)?;
+        let (cos, sin) = precompute_freqs_cis(head_dim, config.rope_theta, rope_max_len, device)?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for layer_idx in 0..config.num_hidden_layers {
@@ -447,7 +469,6 @@ impl QuantizedQwen2WithKv {
             let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;
             let attention_wo = ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
             let attention_norm = ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?;
-
             let ffn_gate = ct.tensor(reader, &format!("{prefix}.ffn_gate.weight"), device)?;
             let ffn_down = ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
             let ffn_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
@@ -489,6 +510,7 @@ impl QuantizedQwen2WithKv {
             device: device.clone(),
             cos,
             sin,
+            total_tokens_seen: 0,
         })
     }
 }
@@ -539,8 +561,7 @@ impl Bonsai27BWithKv {
     }
 
     pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
-        let clamped = pos.min(self.rolling_window).min(self.model.current_kv_pos());
-        self.model.rollback_kv(clamped)
+        self.model.rollback_kv(pos)
     }
 
     pub fn reset_kv(&mut self) {
@@ -549,6 +570,10 @@ impl Bonsai27BWithKv {
 
     pub fn current_kv_pos(&self) -> usize {
         self.model.current_kv_pos()
+    }
+
+    pub fn kv_buffer_len(&self) -> usize {
+        self.model.kv_buffer_len()
     }
 
     pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
