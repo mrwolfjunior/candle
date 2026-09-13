@@ -276,9 +276,9 @@ fn main() -> anyhow::Result<()> {
         .collect();
 
     println!();
-    println!("+---------------+----------------------+----------------------+------------+------------+");
-    println!("| Context Depth | Prefill Throughput   | Speculative Decode   | Accept (α) | Toks/Step  |");
-    println!("+---------------+----------------------+----------------------+------------+------------+");
+    println!("+---------------+----------------------+----------------------+------------+------------+------------+------------+--------------+---------------+");
+    println!("| Context Depth | Prefill Throughput   | Speculative Decode   | Accept (α) | Toks/Step  | Draft Lat. | Target Lat | Target/Draft | Target KV Mem |");
+    println!("+---------------+----------------------+----------------------+------------+------------+------------+------------+--------------+---------------+");
 
     for &ctx_len in &context_lengths {
         if ctx_len > args.max_context {
@@ -287,6 +287,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         engine.reset_kv();
+        engine.reset_timings();
 
         // Construct synthetic input prompt of length ctx_len
         let prompt: Vec<u32> = (0..ctx_len as u32).map(|i| i % 60 + 1).collect();
@@ -318,17 +319,33 @@ fn main() -> anyhow::Result<()> {
         let alpha = (total_accepted_draft as f64 / total_proposed as f64) * 100.0;
         let tau = tokens_emitted as f64 / steps as f64;
 
+        let draft_ms = engine.draft_time.as_secs_f64() * 1000.0 / steps.max(1) as f64;
+        let target_ms = engine.target_time.as_secs_f64() * 1000.0 / steps.max(1) as f64;
+        let ratio = target_ms / draft_ms.max(1e-6);
+
+        let target_kv_bytes = engine.target_verifier.layers.len()
+            * 2
+            * engine.target_verifier.layers[0].n_kv_head
+            * engine.target_verifier.layers[0].head_dim
+            * ctx_len
+            * 2; // FP16 (2 bytes)
+        let target_kv_mb = target_kv_bytes as f64 / (1024.0 * 1024.0);
+
         println!(
-            "| {:>10} ctx | {:>13.1} tok/s | {:>13.1} tok/s | {:>9.1}% | {:>9.2}  |",
+            "| {:>10} ctx | {:>13.1} tok/s | {:>13.1} tok/s | {:>9.1}% | {:>9.2}  | {:>7.2} ms | {:>7.2} ms | {:>10.2}x | {:>10.1} MB |",
             format!("{ctx_len}"),
             prefill_tok_per_sec,
             decode_tok_per_sec,
             alpha,
-            tau
+            tau,
+            draft_ms,
+            target_ms,
+            ratio,
+            target_kv_mb,
         );
     }
 
-    println!("+---------------+----------------------+----------------------+------------+------------+");
+    println!("+---------------+----------------------+----------------------+------------+------------+------------+------------+--------------+---------------+");
     println!();
     println!("Benchmark run complete.");
     Ok(())

@@ -90,6 +90,8 @@ pub struct SuperDraftSpeculativeEngine {
     pub draft_bonsai: Bonsai27BWithKv,
     pub target_verifier: QuantizedQwen2WithKv,
     pub gamma: usize,
+    pub draft_time: std::time::Duration,
+    pub target_time: std::time::Duration,
 }
 
 impl SuperDraftSpeculativeEngine {
@@ -102,7 +104,14 @@ impl SuperDraftSpeculativeEngine {
             draft_bonsai,
             target_verifier,
             gamma,
+            draft_time: std::time::Duration::ZERO,
+            target_time: std::time::Duration::ZERO,
         }
+    }
+
+    pub fn reset_timings(&mut self) {
+        self.draft_time = std::time::Duration::ZERO;
+        self.target_time = std::time::Duration::ZERO;
     }
 
     pub fn gamma(&self) -> usize {
@@ -168,10 +177,14 @@ impl SuperDraftSpeculativeEngine {
         let start_pos = self.target_verifier.current_kv_pos();
 
         // 1. Propose gamma tokens with draft on its device
+        let t_draft_start = std::time::Instant::now();
         let draft_tokens = self.propose(current_token)?;
+        self.draft_time += t_draft_start.elapsed();
 
         // 2. Parallel batch forward pass on target verifier
+        let t_target_start = std::time::Instant::now();
         let target_argmax = self.target_forward_batch(current_token, &draft_tokens)?;
+        self.target_time += t_target_start.elapsed();
 
         // 3. Verify tokens via verify_greedy
         let result = verify_greedy(&draft_tokens, &target_argmax);
@@ -179,16 +192,32 @@ impl SuperDraftSpeculativeEngine {
         // 4. Rollback or synchronize KV caches
         let k = result.num_accepted_draft;
         if k < self.gamma {
-            // Discrepancy at index k < gamma: rollback KV cache on both models to pos + k + 1
-            let rollback_pos = start_pos + k + 1;
-            self.draft_bonsai.rollback_kv(rollback_pos)?;
-            self.target_verifier.rollback_kv(rollback_pos)?;
+            // Discrepancy at index k < gamma:
+            // Target rolls back to start_pos + k + 1 (the position right after target correction token)
+            let target_rollback_pos = start_pos + k + 1;
+            self.target_verifier.rollback_kv(target_rollback_pos)?;
+
+            // Draft proposed gamma candidate tokens during propose().
+            // Exactly (gamma - k) candidate tokens were rejected.
+            // Discard the (gamma - k) rejected tokens from draft's rolling KV cache:
+            let draft_discard_count = self.gamma - k;
+            let draft_rollback_pos = self.draft_bonsai.current_kv_pos().saturating_sub(draft_discard_count);
+            self.draft_bonsai.rollback_kv(draft_rollback_pos)?;
+
+            // Ingest target's correction token into draft cache so both models remain synchronized
+            let t_corr_start = std::time::Instant::now();
+            let correction_token = result.accepted_tokens[k];
+            let input_tensor = Tensor::new(&[[correction_token]], &self.draft_bonsai.model.device)?;
+            let _ = self.draft_bonsai.forward(&input_tensor)?;
+            self.draft_time += t_corr_start.elapsed();
         } else {
             // All gamma draft tokens accepted!
             // Append the final accepted draft token into draft's cache to synchronize
+            let t_sync_start = std::time::Instant::now();
             let last_draft_token = draft_tokens[self.gamma - 1];
             let input_tensor = Tensor::new(&[[last_draft_token]], &self.draft_bonsai.model.device)?;
             let _ = self.draft_bonsai.forward(&input_tensor)?;
+            self.draft_time += t_sync_start.elapsed();
         }
 
         Ok(result)

@@ -371,3 +371,72 @@ fn test_superdraft_engine_prefill() -> candle::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_superdraft_engine_divergence_when_draft_rolling_window_full() -> candle::Result<()> {
+    let device = Device::Cpu;
+    let vocab_size = 16;
+    let hidden_size = 16;
+    let num_heads = 2;
+    let num_kv_heads = 2;
+    let max_seq_len = 64;
+    let window_size = 8;
+    let gamma = 4;
+
+    // Both models transition 1..15 cyclically
+    let mut transitions = Vec::new();
+    for i in 1..15 {
+        transitions.push((i, i + 1));
+    }
+    let draft_qwen = create_deterministic_model(
+        &device,
+        vocab_size,
+        hidden_size,
+        num_heads,
+        num_kv_heads,
+        max_seq_len,
+        &transitions,
+    )?;
+    let draft_bonsai = Bonsai27BWithKv::new(draft_qwen, window_size);
+
+    // Target verifier diverges at token 12: predicts 9 instead of 13
+    let mut target_transitions = transitions.clone();
+    for t in &mut target_transitions {
+        if t.0 == 12 {
+            t.1 = 9;
+        }
+    }
+    let target_verifier = create_deterministic_model(
+        &device,
+        vocab_size,
+        hidden_size,
+        num_heads,
+        num_kv_heads,
+        max_seq_len,
+        &target_transitions,
+    )?;
+
+    let mut engine = SuperDraftSpeculativeEngine::new(draft_bonsai, target_verifier, gamma);
+
+    // Prefill 10 tokens: target is at 10, draft rolling window is capped at 8!
+    let prompt: Vec<u32> = (1..=10).collect();
+    let current_token = engine.prefill(&prompt)?;
+    assert_eq!(current_token, 11);
+    assert_eq!(engine.target_verifier.current_kv_pos(), 10);
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), window_size);
+
+    // Step starting from token 11:
+    // Draft proposes [12, 13, 14, 15]
+    // Target expects [12, 9, ...] -> divergence at k = 1!
+    let res = engine.speculative_step(current_token)?;
+    assert_eq!(res.num_accepted_draft, 1);
+    assert_eq!(res.accepted_tokens, vec![12, 9]);
+
+    // Target accepted 1 draft token + 1 correction token -> advances from 10 to 12
+    assert_eq!(engine.target_verifier.current_kv_pos(), 12);
+    // Draft rolled back the (gamma - k = 4 - 1 = 3) rejected tokens (8 - 3 = 5),
+    // then ingested target's correction token (5 + 1 = 6).
+    assert_eq!(engine.draft_bonsai.current_kv_pos(), 6);
+
+    Ok(())
+}
