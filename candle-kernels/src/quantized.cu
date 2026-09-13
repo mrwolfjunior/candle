@@ -289,6 +289,15 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 // QR = QK / number of values before dequantization
 // QI = number of 32 bit integers before dequantization
 
+#define QK1_0 128
+#define QR1_0 1
+#define QI1_0 (QK1_0 / (4 * QR1_0))
+typedef struct block_q1_0 {
+    half    d;              // delta
+    uint8_t qs[16];         // 128 1-bit quants
+} block_q1_0;
+static_assert(sizeof(block_q1_0) == sizeof(ggml_fp16_t) + 16, "wrong q1_0 block size/padding");
+
 #define QK4_0 32
 #define QR4_0 2
 #define QI4_0 (QK4_0 / (4 * QR4_0))
@@ -1129,6 +1138,46 @@ static __device__ void dequantize_block_q5_1(const void * __restrict__ vx, dst_t
   return dequantize_block<QK5_1, QR5_1, dequantize_q5_1>(vx, yy, nb32);
 }
 
+template<typename dst_t>
+static __device__ void dequantize_block_q1_0(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    const int i = blockIdx.x;
+    const int tid = threadIdx.x;
+
+    const block_q1_0 * x = (const block_q1_0 *) vx;
+    const int b_offset = tid / 16;
+    const int byte_idx = tid % 16;
+
+    const block_q1_0 * b = x + (2 * i + b_offset);
+    const float d = __half2float(b->d);
+    const uint8_t q = b->qs[byte_idx];
+
+    dst_t * y = yy + 256 * i + 8 * tid;
+    #pragma unroll
+    for (int l = 0; l < 8; ++l) {
+        y[l] = (q & (1 << l)) ? d : -d;
+    }
+}
+
+extern "C" __global__ void dequantize_row_q1_0_cuda(const void* vx, half* vy, int64_t k) {
+    const int64_t idx = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    const int64_t byte_idx = idx;
+    const int64_t block_idx = byte_idx / 16;
+    const int64_t byte_in_block = byte_idx % 16;
+
+    if (byte_idx * 8 >= k) return;
+
+    const block_q1_0* x = (const block_q1_0*)vx + block_idx;
+    const float d = __half2float(x->d);
+    const uint8_t q = x->qs[byte_in_block];
+
+    #pragma unroll
+    for (int l = 0; l < 8; ++l) {
+        if (byte_idx * 8 + l < k) {
+            vy[byte_idx * 8 + l] = (q & (1 << l)) ? (half)d : (half)(-d);
+        }
+    }
+}
+
 #define DEQUANTIZE_K(QNAME) \
 extern "C" __global__ void dequantize_block_##QNAME##_f32(const void * __restrict__ vx, float * __restrict__ y) { \
   dequantize_block_##QNAME(vx, y); \
@@ -1151,6 +1200,7 @@ DEQUANTIZE_K(q4_K)
 DEQUANTIZE_K(q5_K)
 DEQUANTIZE_K(q6_K)
 DEQUANTIZE_K(q8_K)
+DEQUANTIZE_K(q1_0)
 DEQUANTIZE(q4_0)
 DEQUANTIZE(q4_1)
 DEQUANTIZE(q5_0)

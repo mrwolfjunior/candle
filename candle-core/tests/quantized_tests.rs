@@ -1535,3 +1535,61 @@ fn test_q1_0_block_size_and_dequant() {
     assert_eq!(out[1], 2.0);
 }
 
+fn test_q1_0(device: &Device) -> Result<()> {
+    if device.is_metal() {
+        return Ok(());
+    }
+    let blocks = (0..4)
+        .map(|i| k_quants::BlockQ1_0 {
+            d: half::f16::from_f32((i + 1) as f32),
+            qs: [
+                0x55, 0xAA, 0x0F, 0xF0, 0x33, 0xCC, 0x5A, 0xA5, 0x12, 0x34, 0x56, 0x78, 0x9A,
+                0xBC, 0xDE, 0xF0,
+            ],
+        })
+        .collect::<Vec<_>>();
+    let raw_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            blocks.as_ptr() as *const u8,
+            blocks.len() * std::mem::size_of::<k_quants::BlockQ1_0>(),
+        )
+    };
+    let q_storage =
+        candle_core::quantized::QStorage::from_data(Cow::Borrowed(raw_bytes), device, GgmlDType::Q1_0)?;
+    let qtensor = quantized::QTensor::new(
+        q_storage,
+        candle_core::Shape::from((4, 128)),
+    )?;
+    let dequant = qtensor.dequantize(device)?;
+    let dequant_vec = dequant.to_vec2::<f32>()?;
+
+    for (i, block) in blocks.iter().enumerate() {
+        let mut expected = vec![0.0f32; 128];
+        block.dequantize(&mut expected);
+        for j in 0..128 {
+            assert_eq!(
+                dequant_vec[i][j], expected[j],
+                "Mismatch at row {i}, col {j}: got {}, expected {}",
+                dequant_vec[i][j], expected[j]
+            );
+        }
+    }
+
+    if device.is_cuda() {
+        let qmatmul = quantized::QMatMul::from_qtensor(qtensor)?;
+        let input = Tensor::randn(0f32, 1f32, (2, 128), device)?;
+        let output = qmatmul.forward(&input)?;
+        assert_eq!(output.dims(), &[2, 4]);
+    }
+
+    Ok(())
+}
+
+test_device!(
+    test_q1_0,
+    test_q1_0_cpu,
+    test_q1_0_cuda,
+    test_q1_0_metal
+);
+
+
