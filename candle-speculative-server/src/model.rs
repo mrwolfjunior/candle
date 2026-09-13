@@ -405,6 +405,21 @@ impl QuantizedQwen2WithKv {
         self.forward_internal(input_ids, None)
     }
 
+    fn embed_input(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let embed_dev = self.tok_embeddings.embeddings().device();
+        let input_on_embed = if input_ids.device().same_device(embed_dev) {
+            input_ids.clone()
+        } else {
+            input_ids.to_device(embed_dev)?
+        };
+        let xs_embed = self.tok_embeddings.forward(&input_on_embed)?;
+        if xs_embed.device().same_device(&self.device) {
+            Ok(xs_embed)
+        } else {
+            xs_embed.to_device(&self.device)
+        }
+    }
+
     pub fn forward_internal(
         &mut self,
         input_ids: &Tensor,
@@ -412,7 +427,7 @@ impl QuantizedQwen2WithKv {
     ) -> Result<Tensor> {
         let (_b_sz, seq_len) = input_ids.dims2()?;
         let index_pos = self.total_tokens_seen;
-        let mut xs = self.tok_embeddings.forward(input_ids)?;
+        let mut xs = self.embed_input(input_ids)?;
 
         for layer in &mut self.layers {
             xs = layer.forward(&xs, &self.cos, &self.sin, rolling_window, index_pos)?;
@@ -446,8 +461,9 @@ impl QuantizedQwen2WithKv {
             .map(|m| m + 1024)
             .unwrap_or(config.max_position_embeddings);
 
-        let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings.dequantize(device)?;
+        // 1. Embeddings - kept in CPU memory to save ~5.1 GB of GPU VRAM
+        let tok_embeddings = ct.tensor(reader, "token_embd.weight", &Device::Cpu)?;
+        let tok_embeddings = tok_embeddings.dequantize(&Device::Cpu)?;
         let tok_embeddings = candle_nn::Embedding::new(tok_embeddings, config.hidden_size);
 
         let norm = RmsNorm::from_qtensor(

@@ -238,6 +238,21 @@ impl Qwen35Model {
         self.forward_internal(input_ids, None)
     }
 
+    fn embed_input(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let embed_dev = self.tok_embeddings.embeddings().device();
+        let input_on_embed = if input_ids.device().same_device(embed_dev) {
+            input_ids.clone()
+        } else {
+            input_ids.to_device(embed_dev)?
+        };
+        let xs_embed = self.tok_embeddings.forward(&input_on_embed)?;
+        if xs_embed.device().same_device(&self.device) {
+            Ok(xs_embed)
+        } else {
+            xs_embed.to_device(&self.device)
+        }
+    }
+
     /// Forward pass with optional rolling window eviction on attention layers.
     ///
     /// Saves a snapshot of `recurrent_state` at each token step to enable $O(1)$ speculative rollback.
@@ -258,7 +273,7 @@ impl Qwen35Model {
                 self.state_snapshots.drain(0..self.state_snapshots.len() - 128);
             }
 
-            let mut xs = self.tok_embeddings.forward(input_ids)?; // [1, 1, hidden_size]
+            let mut xs = self.embed_input(input_ids)?; // [1, 1, hidden_size]
             let mut ssm_idx = 0;
             for block in &mut self.blocks {
                 match block {
@@ -300,7 +315,7 @@ impl Qwen35Model {
                 }
 
                 let single_token = input_ids.narrow(1, t, 1)?; // [1, 1]
-                let mut xs = self.tok_embeddings.forward(&single_token)?;
+                let mut xs = self.embed_input(&single_token)?;
                 let mut ssm_idx = 0;
                 for block in &mut self.blocks {
                     match block {
@@ -359,9 +374,9 @@ impl Qwen35Model {
         let rope_max_len = max_seq_len.map(|m| m + 1024).unwrap_or(32768).max(65536);
         let kv_max_len = max_seq_len.map(|m| m + 1024).unwrap_or(32768);
 
-        // 1. Embeddings
-        let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings.dequantize(device)?;
+        // 1. Embeddings - kept in CPU memory to save ~5.1 GB of GPU VRAM
+        let tok_embeddings = ct.tensor(reader, "token_embd.weight", &Device::Cpu)?;
+        let tok_embeddings = tok_embeddings.dequantize(&Device::Cpu)?;
         let tok_embeddings = candle_nn::Embedding::new(tok_embeddings, config.hidden_size);
 
         // 2. Output RMSNorm
