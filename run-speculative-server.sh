@@ -8,8 +8,29 @@ HOST=${HOST:-"0.0.0.0"}
 GAMMA=${GAMMA:-4}
 MAX_CONTEXT=${MAX_CONTEXT:-65536}
 
-TARGET_MODEL=${TARGET_MODEL:-"qwen2.5-14b-instruct-q4_k_m.gguf"}
-DRAFT_MODEL=${DRAFT_MODEL:-"qwen2.5-1.5b-instruct-q8_0.gguf"}
+# Default frontier models (Qwen3-Coder-30B-A3B target + Qwen3-0.6B draft)
+QWEN3_TARGET="/mnt/data/LMStudio/Qwen3-Coder/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+QWEN3_DRAFT="/mnt/data/LMStudio/draft-models/Qwen3-0.6B-Q4_K_M.gguf"
+
+if [ -z "${TARGET_MODEL:-}" ]; then
+    if [ -f "$QWEN3_TARGET" ]; then
+        TARGET_MODEL="$QWEN3_TARGET"
+    elif [ -f "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" ]; then
+        TARGET_MODEL="Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+    else
+        TARGET_MODEL="qwen2.5-14b-instruct-q4_k_m.gguf"
+    fi
+fi
+
+if [ -z "${DRAFT_MODEL:-}" ]; then
+    if [ -f "$QWEN3_DRAFT" ]; then
+        DRAFT_MODEL="$QWEN3_DRAFT"
+    elif [ -f "Qwen3-0.6B-Q4_K_M.gguf" ]; then
+        DRAFT_MODEL="Qwen3-0.6B-Q4_K_M.gguf"
+    else
+        DRAFT_MODEL="qwen2.5-1.5b-instruct-q8_0.gguf"
+    fi
+fi
 
 # Detect GPUs via nvidia-smi if available
 DRAFT_DEV="cuda:0"
@@ -53,8 +74,12 @@ if [ "${BUILD_RELEASE:-0}" = "1" ] || [ ! -f "./target/release/speculative-serve
     CUDA_COMPUTE_CAP=61 CANDLE_CUDA_ARCHS="61,75" cargo build --release --features cuda -p candle-speculative-server --bin speculative-server
 fi
 
-BIN="./target/release/speculative-server"
-if [ ! -f "$BIN" ] && [ -f "./target/debug/speculative-server" ]; then
+BIN=""
+if [ -f "./target/release/speculative-server" ]; then
+    BIN="./target/release/speculative-server"
+elif [ -f "/home/emanuele/Documents/speculative-bin/speculative-server" ]; then
+    BIN="/home/emanuele/Documents/speculative-bin/speculative-server"
+elif [ -f "./target/debug/speculative-server" ]; then
     BIN="./target/debug/speculative-server"
 fi
 
