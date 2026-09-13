@@ -84,7 +84,8 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
     )?;
     let dummy_norm = candle_transformers::quantized_nn::RmsNorm::from_qtensor(dummy_norm_w, 1e-6)?;
 
-    let kv_cache = InPlaceKvCache::new(1, num_kv_heads, head_dim, max_context, DType::F32, device)?;
+    let total_context = max_context + 1024;
+    let kv_cache = InPlaceKvCache::new(1, num_kv_heads, head_dim, total_context, DType::F32, device)?;
 
     let layer = Layer {
         attention_wq: dummy_q.clone(),
@@ -102,7 +103,7 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
         head_dim,
     };
 
-    let (cos, sin) = precompute_freqs_cis(head_dim, 1_000_000.0, max_context, device)?;
+    let (cos, sin) = precompute_freqs_cis(head_dim, 1_000_000.0, total_context, device)?;
     let mut embed_data = vec![0.0f32; vocab_size * hidden_size];
     for i in 0..hidden_size.min(vocab_size) {
         embed_data[i * hidden_size + i] = 1.0;
@@ -125,7 +126,7 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
         num_hidden_layers: 1,
         num_attention_heads: num_heads,
         num_key_value_heads: num_kv_heads,
-        max_position_embeddings: max_context,
+        max_position_embeddings: total_context,
         rms_norm_eps: 1e-6,
         rope_theta: 1_000_000.0,
     };

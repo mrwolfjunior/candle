@@ -211,16 +211,27 @@ pub struct Layer {
     pub head_dim: usize,
 }
 
-fn build_causal_mask(q_len: usize, kv_len: usize, device: &Device, dtype: DType) -> Result<Tensor> {
+fn build_causal_mask(
+    q_len: usize,
+    kv_len: usize,
+    q_start_pos: usize,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
     if q_len == 1 {
         return Tensor::zeros((1, 1, 1, kv_len), dtype, device);
     }
     let mut mask = vec![0f32; q_len * kv_len];
-    let offset = if q_len > kv_len { q_len - kv_len } else { 0 };
+    let kv_offset = if q_start_pos + q_len > kv_len {
+        (q_start_pos + q_len) - kv_len
+    } else {
+        0
+    };
     for q in 0..q_len {
+        let query_pos = q_start_pos + q;
         for k in 0..kv_len {
-            let key_pos = k + offset;
-            if key_pos > q {
+            let key_pos = k + kv_offset;
+            if key_pos > query_pos {
                 mask[q * kv_len + k] = f32::NEG_INFINITY;
             }
         }
@@ -278,7 +289,7 @@ impl Layer {
         let mut att = (q.matmul(&k_all.t()?)? / (self.head_dim as f64).sqrt())?;
 
         if seq_len > 1 {
-            let mask = build_causal_mask(seq_len, kv_len, att.device(), att.dtype())?;
+            let mask = build_causal_mask(seq_len, kv_len, index_pos, att.device(), att.dtype())?;
             att = att.broadcast_add(&mask)?;
         }
 
@@ -386,7 +397,9 @@ impl QuantizedQwen2WithKv {
     ) -> Result<Self> {
         let config = Config::from_gguf(ct)?;
         let head_dim = config.head_dim();
-        let kv_max_len = max_seq_len.unwrap_or(config.max_position_embeddings);
+        let kv_max_len = max_seq_len
+            .map(|m| m + 1024)
+            .unwrap_or(config.max_position_embeddings);
 
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
         let tok_embeddings = tok_embeddings.dequantize(device)?;
