@@ -185,6 +185,12 @@ fn main() -> anyhow::Result<()> {
         tracing::info!("Loading Bonsai-27B draft model from {draft_path} on {draft_dev:?} (window={})", args.draft_window);
         let mut draft_file = std::fs::File::open(draft_path)?;
         let draft_content = candle::quantized::gguf_file::Content::read(&mut draft_file)?;
+        tracing::info!("Draft tensor count: {}", draft_content.tensor_infos.len());
+        let mut draft_keys: Vec<_> = draft_content.tensor_infos.keys().cloned().collect();
+        draft_keys.sort();
+        for (i, name) in draft_keys.iter().take(20).enumerate() {
+            tracing::info!("  Draft Tensor #{}: {}", i, name);
+        }
         let draft = BonsaiModel::from_gguf_with_window(
             &draft_content,
             &mut draft_file,
@@ -195,6 +201,12 @@ fn main() -> anyhow::Result<()> {
         tracing::info!("Loading Target model from {target_path} on {target_dev:?} (max_context={})", args.max_context);
         let mut target_file = std::fs::File::open(target_path)?;
         let target_content = candle::quantized::gguf_file::Content::read(&mut target_file)?;
+        tracing::info!("Target tensor count: {}", target_content.tensor_infos.len());
+        let mut target_keys: Vec<_> = target_content.tensor_infos.keys().cloned().collect();
+        target_keys.sort();
+        for (i, name) in target_keys.iter().take(20).enumerate() {
+            tracing::info!("  Target Tensor #{}: {}", i, name);
+        }
         let target = TargetModel::from_gguf_with_max_seq_len(
             &target_content,
             &mut target_file,
