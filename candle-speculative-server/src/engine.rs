@@ -205,19 +205,25 @@ impl SuperDraftSpeculativeEngine {
             return Err(candle::Error::Msg("Cannot prefill empty prompt".into()));
         }
 
-        let draft_input =
-            Tensor::from_slice(prompt, (1, prompt.len()), &self.draft_bonsai.model.device)?;
-        let _ = self.draft_bonsai.forward(&draft_input)?;
+        let chunk_size = 2048;
+        let mut last_next_token = 0;
 
-        let target_input =
-            Tensor::from_slice(prompt, (1, prompt.len()), &self.target_verifier.device)?;
-        let logits = self.target_verifier.forward(&target_input)?;
-        let next_token = logits
-            .squeeze(0)?
-            .i(prompt.len() - 1)?
-            .argmax(candle::D::Minus1)?
-            .to_scalar::<u32>()?;
-        Ok(next_token)
+        for chunk in prompt.chunks(chunk_size) {
+            let draft_input =
+                Tensor::from_slice(chunk, (1, chunk.len()), &self.draft_bonsai.model.device)?;
+            let _ = self.draft_bonsai.forward(&draft_input)?;
+
+            let target_input =
+                Tensor::from_slice(chunk, (1, chunk.len()), &self.target_verifier.device)?;
+            let logits = self.target_verifier.forward(&target_input)?;
+            last_next_token = logits
+                .squeeze(0)?
+                .i(chunk.len() - 1)?
+                .argmax(candle::D::Minus1)?
+                .to_scalar::<u32>()?;
+        }
+
+        Ok(last_next_token)
     }
 
     /// Rollback KV caches on both models
