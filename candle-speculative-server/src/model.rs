@@ -468,12 +468,18 @@ impl QuantizedQwen2WithKv {
             let attention_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
             let attention_wk = ct.tensor(reader, &format!("{prefix}.attn_k.weight"), device)?;
             let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;
-            let attention_wo = ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
+            let attention_wo = match ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device) {
+                Ok(t) => t,
+                _ => ct.tensor(reader, &format!("{prefix}.attn_out.weight"), device)?,
+            };
             let attention_norm = ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?;
             let ffn_gate = ct.tensor(reader, &format!("{prefix}.ffn_gate.weight"), device)?;
             let ffn_down = ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
             let ffn_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
-            let ffn_norm = ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?;
+            let ffn_norm = match ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device) {
+                Ok(t) => t,
+                _ => ct.tensor(reader, &format!("{prefix}.post_attention_norm.weight"), device)?,
+            };
 
             let kv_dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
             let kv_cache = InPlaceKvCache::new(

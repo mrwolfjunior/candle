@@ -60,6 +60,8 @@ impl SwiGluFfn {
         };
 
         let post_attention_norm_q = find_qtensor(&[
+            format!("{prefix}post_attention_norm.weight"),
+            format!("{prefix}post_attention_norm"),
             format!("{prefix}ffn_norm.weight"),
             format!("{prefix}ffn_norm"),
             format!("{prefix}post_attention_layernorm.weight"),
