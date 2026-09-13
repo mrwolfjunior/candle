@@ -1,6 +1,6 @@
 use candle_speculative_server::{
     server::{create_app, AppState},
-    Bonsai27BWithKv, CliArgs, QuantizedQwen2WithKv, SuperDraftSpeculativeEngine,
+    Bonsai27BWithKv, CliArgs, SuperDraftSpeculativeEngine,
 };
 use clap::Parser;
 use std::sync::Arc;
@@ -49,10 +49,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Loading target verifier from {target_path} on {target_dev:?}");
             let mut target_file = std::fs::File::open(target_path)?;
             let target_content = candle::quantized::gguf_file::Content::read(&mut target_file)?;
-            let target_verifier = QuantizedQwen2WithKv::from_gguf_with_max_seq_len(
+            let target_verifier = Bonsai27BWithKv::from_gguf_with_window(
                 &target_content,
                 &mut target_file,
-                Some(args.max_context),
+                args.max_context,
                 &target_dev,
             )?;
 

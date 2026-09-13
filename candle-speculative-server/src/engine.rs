@@ -84,11 +84,121 @@ impl Default for SpeculativeEngineConfig {
 }
 
 use candle::{IndexOp, Result, Tensor};
-use crate::model::{Bonsai27BWithKv, QuantizedQwen2WithKv};
+use crate::model::{Bonsai27BWithKv, BonsaiBackend, QuantizedQwen2WithKv};
+use crate::qwen35_model::Qwen35Model;
+
+pub enum TargetVerifier {
+    Qwen2(QuantizedQwen2WithKv),
+    Qwen35(Qwen35Model),
+    Bonsai(Bonsai27BWithKv),
+}
+
+impl TargetVerifier {
+    pub fn current_kv_pos(&self) -> usize {
+        match self {
+            Self::Qwen2(m) => m.current_kv_pos(),
+            Self::Qwen35(m) => m.current_kv_pos(),
+            Self::Bonsai(m) => m.current_kv_pos(),
+        }
+    }
+
+    pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
+        match self {
+            Self::Qwen2(m) => m.rollback_kv(pos),
+            Self::Qwen35(m) => m.rollback_kv(pos),
+            Self::Bonsai(m) => m.rollback_kv(pos),
+        }
+    }
+
+    pub fn reset_kv(&mut self) {
+        match self {
+            Self::Qwen2(m) => m.reset_kv(),
+            Self::Qwen35(m) => m.reset_kv(),
+            Self::Bonsai(m) => m.reset_kv(),
+        }
+    }
+
+    pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Qwen2(m) => m.forward(input_ids),
+            Self::Qwen35(m) => m.forward(input_ids),
+            Self::Bonsai(m) => m.forward(input_ids),
+        }
+    }
+
+    pub fn device(&self) -> &candle::Device {
+        match self {
+            Self::Qwen2(m) => &m.device,
+            Self::Qwen35(m) => &m.device,
+            Self::Bonsai(m) => m.device(),
+        }
+    }
+
+    pub fn kv_cache_bytes(&self, ctx_len: usize) -> usize {
+        match self {
+            Self::Qwen2(m) => {
+                let n_layers = m.layers.len();
+                let (n_kv_head, head_dim) = if let Some(l) = m.layers.first() {
+                    (l.n_kv_head, l.head_dim)
+                } else {
+                    (8, 128)
+                };
+                n_layers * 2 * n_kv_head * head_dim * ctx_len * 2
+            }
+            Self::Qwen35(m) => {
+                let mut attn_count = 0;
+                for b in &m.blocks {
+                    if b.is_attn() {
+                        attn_count += 1;
+                    }
+                }
+                attn_count * 2 * m.config.num_key_value_heads * m.config.head_dim * ctx_len * 2
+            }
+            Self::Bonsai(b) => match &b.backend {
+                BonsaiBackend::Qwen2(m) => {
+                    let n_layers = m.layers.len();
+                    let (n_kv_head, head_dim) = if let Some(l) = m.layers.first() {
+                        (l.n_kv_head, l.head_dim)
+                    } else {
+                        (8, 128)
+                    };
+                    n_layers * 2 * n_kv_head * head_dim * ctx_len * 2
+                }
+                BonsaiBackend::Qwen35(m) => {
+                    let mut attn_count = 0;
+                    for b in &m.blocks {
+                        if b.is_attn() {
+                            attn_count += 1;
+                        }
+                    }
+                    attn_count * 2 * m.config.num_key_value_heads * m.config.head_dim * ctx_len * 2
+                }
+            },
+        }
+    }
+}
+
+impl From<QuantizedQwen2WithKv> for TargetVerifier {
+    fn from(m: QuantizedQwen2WithKv) -> Self {
+        Self::Qwen2(m)
+    }
+}
+
+impl From<Qwen35Model> for TargetVerifier {
+    fn from(m: Qwen35Model) -> Self {
+        Self::Qwen35(m)
+    }
+}
+
+impl From<Bonsai27BWithKv> for TargetVerifier {
+    fn from(m: Bonsai27BWithKv) -> Self {
+        Self::Bonsai(m)
+    }
+}
 
 pub struct SuperDraftSpeculativeEngine {
     pub draft_bonsai: Bonsai27BWithKv,
-    pub target_verifier: QuantizedQwen2WithKv,
+    pub target_verifier: TargetVerifier,
     pub gamma: usize,
     pub draft_time: std::time::Duration,
     pub target_time: std::time::Duration,
@@ -97,12 +207,12 @@ pub struct SuperDraftSpeculativeEngine {
 impl SuperDraftSpeculativeEngine {
     pub fn new(
         draft_bonsai: Bonsai27BWithKv,
-        target_verifier: QuantizedQwen2WithKv,
+        target_verifier: impl Into<TargetVerifier>,
         gamma: usize,
     ) -> Self {
         Self {
             draft_bonsai,
-            target_verifier,
+            target_verifier: target_verifier.into(),
             gamma,
             draft_time: std::time::Duration::ZERO,
             target_time: std::time::Duration::ZERO,
@@ -159,7 +269,7 @@ impl SuperDraftSpeculativeEngine {
         let input_tensor = Tensor::from_slice(
             &target_input,
             (1, target_input.len()),
-            &self.target_verifier.device,
+            self.target_verifier.device(),
         )?;
         let logits = self.target_verifier.forward(&input_tensor)?;
         let argmax_tensor = logits.squeeze(0)?.argmax(candle::D::Minus1)?;
@@ -236,7 +346,7 @@ impl SuperDraftSpeculativeEngine {
             let _ = self.draft_bonsai.forward(&draft_input)?;
 
             let target_input =
-                Tensor::from_slice(chunk, (1, chunk.len()), &self.target_verifier.device)?;
+                Tensor::from_slice(chunk, (1, chunk.len()), self.target_verifier.device())?;
             let logits = self.target_verifier.forward(&target_input)?;
             last_next_token = logits
                 .squeeze(0)?

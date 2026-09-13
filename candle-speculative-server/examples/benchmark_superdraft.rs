@@ -3,7 +3,7 @@ use candle_speculative_server::{
     kv_cache::InPlaceKvCache,
     model::{precompute_freqs_cis, Config, Layer},
     Bonsai27BWithKv as BonsaiModel, QuantizedQwen2WithKv as TargetModel,
-    SuperDraftSpeculativeEngine,
+    SuperDraftSpeculativeEngine, TargetVerifier,
 };
 use clap::Parser;
 use std::time::Instant;
@@ -55,6 +55,30 @@ struct BenchmarkArgs {
     /// Simulate realistic ~75% draft acceptance rate with periodic rollbacks in mock mode
     #[arg(long, default_value_t = false)]
     simulate_divergence: bool,
+
+    /// Only verify draft model loading and single-token decode on draft device
+    #[arg(long, default_value_t = false)]
+    verify_draft_only: bool,
+}
+
+fn get_gpu_memory_info() -> Option<String> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=index,name,memory.used,memory.total", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = Vec::new();
+        for line in stdout.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                lines.push(format!("    GPU {line}"));
+            }
+        }
+        Some(lines.join("\n"))
+    } else {
+        None
+    }
 }
 
 fn parse_device(device_str: &str) -> anyhow::Result<Device> {
@@ -202,16 +226,77 @@ fn main() -> anyhow::Result<()> {
     println!("Tokens to Generate: {}", args.gen_tokens);
     println!("Mock Mode:          {}", args.mock);
     println!("Simulate Divergence: {}", args.simulate_divergence);
+    println!("Verify Draft Only:  {}", args.verify_draft_only);
     println!("-------------------------------------------------------------------------------");
 
     let draft_dev = parse_device(&args.draft_device)?;
     let target_dev = parse_device(&args.target_device)?;
 
+    if args.verify_draft_only {
+        let draft_path = args.draft_model.unwrap_or_else(|| {
+            "/mnt/data/LMStudio/lmstudio-community/Bonsai-27B-GGUF/Bonsai-27B-Q1_0.gguf".to_string()
+        });
+        println!("=== Draft Sanity Verification: {} on {} ===", draft_path, args.draft_device);
+        let t_load = Instant::now();
+        let mut draft_file = std::fs::File::open(&draft_path)?;
+        let draft_content = candle::quantized::gguf_file::Content::read(&mut draft_file)?;
+        let mut draft = BonsaiModel::from_gguf_with_window(
+            &draft_content,
+            &mut draft_file,
+            args.draft_window,
+            &draft_dev,
+        )?;
+        let load_duration = t_load.elapsed();
+        println!("  Draft model loaded successfully in {:.2?}", load_duration);
+        if let Some(gpu_mem) = get_gpu_memory_info() {
+            println!("  Resident GPU Memory:\n{}", gpu_mem);
+        }
+
+        println!("  Executing single-token decode test on {}...", args.draft_device);
+        let input_tensor = Tensor::new(&[[151644u32]], &draft_dev)?;
+        let t_warmup = Instant::now();
+        let logits = draft.forward(&input_tensor)?;
+        let warmup_lat = t_warmup.elapsed();
+        println!("  Warmup forward completed in {:.2?}, logits shape: {:?}", warmup_lat, logits.shape());
+        let mut current_token = logits.squeeze(0)?.squeeze(0)?.argmax(candle::D::Minus1)?.to_scalar::<u32>()?;
+        println!("  Initial decoded token: {}", current_token);
+
+        println!("  Running {} decode iterations...", args.gen_tokens);
+        let t_decode = Instant::now();
+        let mut tokens = vec![current_token];
+        for _ in 1..args.gen_tokens {
+            let input = Tensor::new(&[[current_token]], &draft_dev)?;
+            let l = draft.forward(&input)?;
+            current_token = l.squeeze(0)?.squeeze(0)?.argmax(candle::D::Minus1)?.to_scalar::<u32>()?;
+            tokens.push(current_token);
+        }
+        let decode_duration = t_decode.elapsed();
+        let tok_per_sec = args.gen_tokens as f64 / decode_duration.as_secs_f64();
+        let ms_per_tok = decode_duration.as_secs_f64() * 1000.0 / args.gen_tokens as f64;
+
+        println!("===============================================================================");
+        println!("  Draft Single-Token Decode Verification Summary");
+        println!("===============================================================================");
+        println!("  Draft Device:       {}", args.draft_device);
+        println!("  Tokens Generated:   {}", args.gen_tokens);
+        println!("  Total Decode Time:  {:.3} s", decode_duration.as_secs_f64());
+        println!("  Latency:            {:.2} ms/token", ms_per_tok);
+        println!("  Throughput:         {:.2} tokens/sec", tok_per_sec);
+        println!("  Current KV Pos:     {}", draft.current_kv_pos());
+        if let Some(gpu_mem) = get_gpu_memory_info() {
+            println!("  Final GPU Memory:\n{}", gpu_mem);
+        }
+        println!("  Tokens Decoded:     {:?}", tokens);
+        println!("===============================================================================");
+        println!("Draft Sanity Verification: PASSED!");
+        return Ok(());
+    }
+
     let (draft_model, target_model) = if args.mock || args.draft_model.is_none() || args.target_model.is_none() {
         tracing::info!("Initializing mock/synthetic models for benchmark demonstration");
         let draft = create_mock_draft(&draft_dev, args.draft_window, args.max_context, args.simulate_divergence)?;
         let target = create_mock_target(&target_dev, args.max_context)?;
-        (draft, target)
+        (draft, TargetVerifier::from(target))
     } else {
         let draft_path = args.draft_model.as_ref().unwrap();
         let target_path = args.target_model.as_ref().unwrap();
@@ -226,13 +311,8 @@ fn main() -> anyhow::Result<()> {
                 tracing::info!("  Draft Meta: {} = {:?}", k, v);
             }
         }
-        let mut draft_keys: Vec<_> = draft_content.tensor_infos.keys().cloned().collect();
-        draft_keys.sort();
-        for (i, name) in draft_keys.iter().take(20).enumerate() {
-            tracing::info!("  Draft Tensor #{}: {}", i, name);
-        }
 
-        tracing::info!("Inspecting Target model from {target_path} on {target_dev:?} (max_context={})", args.max_context);
+        tracing::info!("Loading Target model from {target_path} on {target_dev:?} (max_context={})", args.max_context);
         let mut target_file = std::fs::File::open(target_path)?;
         let target_content = candle::quantized::gguf_file::Content::read(&mut target_file)?;
         tracing::info!("Target tensor count: {}", target_content.tensor_infos.len());
@@ -242,11 +322,6 @@ fn main() -> anyhow::Result<()> {
                 tracing::info!("  Target Meta: {} = {:?}", k, v);
             }
         }
-        let mut target_keys: Vec<_> = target_content.tensor_infos.keys().cloned().collect();
-        target_keys.sort();
-        for (i, name) in target_keys.iter().take(20).enumerate() {
-            tracing::info!("  Target Tensor #{}: {}", i, name);
-        }
 
         let draft = BonsaiModel::from_gguf_with_window(
             &draft_content,
@@ -255,14 +330,18 @@ fn main() -> anyhow::Result<()> {
             &draft_dev,
         )?;
 
-        let target = TargetModel::from_gguf_with_max_seq_len(
+        let target = BonsaiModel::from_gguf_with_window(
             &target_content,
             &mut target_file,
-            Some(args.max_context),
+            args.max_context,
             &target_dev,
         )?;
 
-        (draft, target)
+        if let Some(gpu_mem) = get_gpu_memory_info() {
+            println!("Resident GPU Memory after model loading:\n{}", gpu_mem);
+        }
+
+        (draft, TargetVerifier::from(target))
     };
 
     let mut engine = SuperDraftSpeculativeEngine::new(draft_model, target_model, args.gamma);
@@ -321,12 +400,7 @@ fn main() -> anyhow::Result<()> {
         let target_ms = engine.target_time.as_secs_f64() * 1000.0 / steps.max(1) as f64;
         let ratio = target_ms / draft_ms.max(1e-6);
 
-        let target_kv_bytes = engine.target_verifier.layers.len()
-            * 2
-            * engine.target_verifier.layers[0].n_kv_head
-            * engine.target_verifier.layers[0].head_dim
-            * ctx_len
-            * 2; // FP16 (2 bytes)
+        let target_kv_bytes = engine.target_verifier.kv_cache_bytes(ctx_len);
         let target_kv_mb = target_kv_bytes as f64 / (1024.0 * 1024.0);
 
         println!(
@@ -345,6 +419,9 @@ fn main() -> anyhow::Result<()> {
 
     println!("+---------------+----------------------+----------------------+------------+------------+------------+------------+--------------+---------------+");
     println!();
+    if let Some(gpu_mem) = get_gpu_memory_info() {
+        println!("Final GPU Memory:\n{}", gpu_mem);
+    }
     println!("Benchmark run complete.");
     Ok(())
 }

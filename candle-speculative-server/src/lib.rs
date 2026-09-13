@@ -7,7 +7,7 @@ pub mod qwen35_ssm;
 pub mod qwen35_state;
 pub mod server;
 
-pub use engine::SuperDraftSpeculativeEngine;
+pub use engine::{SuperDraftSpeculativeEngine, TargetVerifier};
 pub use model::{Bonsai27BWithKv, BonsaiBackend, QuantizedQwen2WithKv};
 pub use qwen35_attn::Qwen35AttnLayer;
 pub use qwen35_model::{Qwen35Block, Qwen35Model, SwiGluFfn};
