@@ -87,6 +87,10 @@ struct Args {
     #[arg(long)]
     split_prompt: bool,
 
+    /// Chunk size for processing long prompts without OOM (e.g. 512).
+    #[arg(long)]
+    chunk_size: Option<usize>,
+
     /// Run on CPU rather than GPU even if a GPU is available.
     #[arg(long)]
     cpu: bool,
@@ -296,7 +300,23 @@ fn main() -> anyhow::Result<()> {
 
     let start_prompt_processing = std::time::Instant::now();
 
-    let mut next_token = if !args.split_prompt {
+    let mut next_token = if let Some(chunk_size) = args.chunk_size {
+        let mut offset = 0;
+        let mut token = 0;
+        while offset < tokens.len() {
+            let remaining = tokens.len() - offset;
+            let cur_chunk = remaining.min(chunk_size);
+            let chunk = &tokens[offset..offset + cur_chunk];
+            let input = Tensor::new(chunk, &device)?.unsqueeze(0)?;
+            let logits = model.forward(&input, offset)?;
+            if offset + cur_chunk == tokens.len() {
+                let logits = logits.squeeze(0)?;
+                token = logits_processor.sample(&logits)?;
+            }
+            offset += cur_chunk;
+        }
+        token
+    } else if !args.split_prompt {
         let input = Tensor::new(tokens, &device)?.unsqueeze(0)?;
         let logits = model.forward(&input, 0)?;
         let logits = logits.squeeze(0)?;
