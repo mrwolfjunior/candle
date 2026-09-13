@@ -1,6 +1,6 @@
 use candle::{
     quantized::QMatMul,
-    DType, Device, Result, Tensor,
+    DType, Device, Module, Result, Tensor,
 };
 use candle_transformers::quantized_nn::RmsNorm;
 use crate::kv_cache::InPlaceKvCache;
@@ -211,6 +211,89 @@ pub struct Layer {
     pub head_dim: usize,
 }
 
+impl Layer {
+    pub fn forward(
+        &mut self,
+        xs: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        rolling_window: Option<usize>,
+    ) -> Result<Tensor> {
+        let (b_sz, seq_len, n_embd) = xs.dims3()?;
+        let index_pos = self.kv_cache.current_pos();
+
+        let norm_xs = self.attention_norm.forward(xs)?;
+        let q = self.attention_wq.forward(&norm_xs)?;
+        let k = self.attention_wk.forward(&norm_xs)?;
+        let v = self.attention_wv.forward(&norm_xs)?;
+
+        let q = q
+            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k = k
+            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let v = v
+            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+
+        let cos_pos = cos.narrow(0, index_pos, seq_len)?;
+        let sin_pos = sin.narrow(0, index_pos, seq_len)?;
+        let q = candle_nn::rotary_emb::rope(&q, &cos_pos, &sin_pos)?;
+        let k = candle_nn::rotary_emb::rope(&k, &cos_pos, &sin_pos)?;
+
+        if let Some(window) = rolling_window {
+            self.kv_cache.append_rolling(&k, &v, window)?;
+        } else {
+            self.kv_cache.append(&k, &v)?;
+        }
+
+        let (k_all, v_all) = self.kv_cache.current_view()?;
+
+        let n_rep = self.n_head / self.n_kv_head;
+        let k_all = candle_transformers::utils::repeat_kv(k_all, n_rep)?;
+        let v_all = candle_transformers::utils::repeat_kv(v_all, n_rep)?;
+
+        let mut att = (q.matmul(&k_all.t()?)? / (self.head_dim as f64).sqrt())?;
+
+        if seq_len > 1 {
+            let mask = candle_transformers::utils::build_additive_causal_mask(
+                seq_len,
+                index_pos,
+                None,
+                att.device(),
+                att.dtype(),
+            )?;
+            att = att.broadcast_add(&mask)?;
+        }
+
+        let att = candle_nn::ops::softmax_last_dim(&att)?;
+        let v_cont = if v_all.is_contiguous() {
+            v_all
+        } else {
+            v_all.contiguous()?
+        };
+        let y = att.matmul(&v_cont)?;
+        let y = y.transpose(1, 2)?.reshape((b_sz, seq_len, n_embd))?;
+        let y = self.attention_wo.forward(&y)?;
+        let xs = (&y + xs)?;
+
+        // FFN
+        let norm_xs = self.ffn_norm.forward(&xs)?;
+        let gate = self.ffn_gate.forward(&norm_xs)?;
+        let up = self.ffn_up.forward(&norm_xs)?;
+        let silu_gate = candle_nn::ops::silu(&gate)?;
+        let h = silu_gate.broadcast_mul(&up)?;
+        let down = self.ffn_down.forward(&h)?;
+        let xs = (&down + &xs)?;
+
+        Ok(xs)
+    }
+}
+
 pub struct QuantizedQwen2WithKv {
     pub tok_embeddings: candle_nn::Embedding,
     pub layers: Vec<Layer>,
@@ -252,6 +335,27 @@ impl QuantizedQwen2WithKv {
             layer.kv_cache.append_rolling(k, v, window)?;
         }
         Ok(())
+    }
+
+    pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
+        self.forward_internal(input_ids, None)
+    }
+
+    pub fn forward_internal(
+        &mut self,
+        input_ids: &Tensor,
+        rolling_window: Option<usize>,
+    ) -> Result<Tensor> {
+        let (_b_sz, _seq_len) = input_ids.dims2()?;
+        let mut xs = self.tok_embeddings.forward(input_ids)?;
+
+        for layer in &mut self.layers {
+            xs = layer.forward(&xs, &self.cos, &self.sin, rolling_window)?;
+        }
+
+        let xs = self.norm.forward(&xs)?;
+        let logits = self.output.forward(&xs)?;
+        Ok(logits)
     }
 
     pub fn from_gguf<R: std::io::Seek + std::io::Read>(
@@ -400,6 +504,10 @@ impl Bonsai27BWithKv {
 
     pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
         self.model.append_kv_rolling(k, v, self.rolling_window)
+    }
+
+    pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
+        self.model.forward_internal(input_ids, Some(self.rolling_window))
     }
 }
 

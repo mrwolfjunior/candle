@@ -82,3 +82,154 @@ impl Default for SpeculativeEngineConfig {
         }
     }
 }
+
+use candle::{IndexOp, Result, Tensor};
+use crate::model::{Bonsai27BWithKv, QuantizedQwen2WithKv};
+
+pub struct SuperDraftSpeculativeEngine {
+    pub draft_bonsai: Bonsai27BWithKv,
+    pub target_verifier: QuantizedQwen2WithKv,
+    pub gamma: usize,
+}
+
+impl SuperDraftSpeculativeEngine {
+    pub fn new(
+        draft_bonsai: Bonsai27BWithKv,
+        target_verifier: QuantizedQwen2WithKv,
+        gamma: usize,
+    ) -> Self {
+        Self {
+            draft_bonsai,
+            target_verifier,
+            gamma,
+        }
+    }
+
+    pub fn gamma(&self) -> usize {
+        self.gamma
+    }
+
+    /// Autoregressively propose `gamma` draft tokens using `draft_bonsai`.
+    ///
+    /// Input `current_token` is fed at current position `pos`.
+    /// Proposes `gamma` tokens [d_1, d_2, ..., d_gamma].
+    /// Draft's KV cache appends [current_token, d_1, ..., d_{gamma-1}],
+    /// ending at position `pos + gamma`.
+    pub fn propose(&mut self, current_token: u32) -> Result<Vec<u32>> {
+        let mut draft_tokens = Vec::with_capacity(self.gamma);
+        let mut next_in = current_token;
+
+        for _ in 0..self.gamma {
+            let input_tensor = Tensor::new(&[[next_in]], &self.draft_bonsai.model.device)?;
+            let logits = self.draft_bonsai.forward(&input_tensor)?;
+            let pred_token = logits
+                .squeeze(0)?
+                .squeeze(0)?
+                .argmax(candle::D::Minus1)?
+                .to_scalar::<u32>()?;
+            draft_tokens.push(pred_token);
+            next_in = pred_token;
+        }
+
+        Ok(draft_tokens)
+    }
+
+    /// Parallel batch forward pass on `target_verifier` to verify draft tokens.
+    ///
+    /// Evaluates `[current_token, d_1, d_2, ..., d_gamma]` in a single batch pass of length `gamma + 1`.
+    /// Returns `target_argmax` containing `gamma + 1` predicted tokens.
+    pub fn target_forward_batch(
+        &mut self,
+        current_token: u32,
+        draft_tokens: &[u32],
+    ) -> Result<Vec<u32>> {
+        let mut target_input = Vec::with_capacity(draft_tokens.len() + 1);
+        target_input.push(current_token);
+        target_input.extend_from_slice(draft_tokens);
+
+        let input_tensor = Tensor::from_slice(
+            &target_input,
+            (1, target_input.len()),
+            &self.target_verifier.device,
+        )?;
+        let logits = self.target_verifier.forward(&input_tensor)?;
+        let argmax_tensor = logits.squeeze(0)?.argmax(candle::D::Minus1)?;
+        let target_argmax = argmax_tensor.to_vec1::<u32>()?;
+        Ok(target_argmax)
+    }
+
+    /// Execute a single speculative iteration:
+    /// 1. Propose `gamma` tokens with draft on its device.
+    /// 2. Parallel batch forward pass on target verifier.
+    /// 3. Verify tokens via `verify_greedy`.
+    /// 4. If discrepancy at index `k < gamma`, rollback KV cache on both models to `pos + k + 1`.
+    ///    If all accepted ($k == gamma$), synchronize draft KV cache with the final draft token.
+    pub fn step(&mut self, current_token: u32) -> Result<SpeculativeResult> {
+        let start_pos = self.target_verifier.current_kv_pos();
+
+        // 1. Propose gamma tokens with draft on its device
+        let draft_tokens = self.propose(current_token)?;
+
+        // 2. Parallel batch forward pass on target verifier
+        let target_argmax = self.target_forward_batch(current_token, &draft_tokens)?;
+
+        // 3. Verify tokens via verify_greedy
+        let result = verify_greedy(&draft_tokens, &target_argmax);
+
+        // 4. Rollback or synchronize KV caches
+        let k = result.num_accepted_draft;
+        if k < self.gamma {
+            // Discrepancy at index k < gamma: rollback KV cache on both models to pos + k + 1
+            let rollback_pos = start_pos + k + 1;
+            self.draft_bonsai.rollback_kv(rollback_pos)?;
+            self.target_verifier.rollback_kv(rollback_pos)?;
+        } else {
+            // All gamma draft tokens accepted!
+            // Append the final accepted draft token into draft's cache to synchronize
+            let last_draft_token = draft_tokens[self.gamma - 1];
+            let input_tensor = Tensor::new(&[[last_draft_token]], &self.draft_bonsai.model.device)?;
+            let _ = self.draft_bonsai.forward(&input_tensor)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Speculative step alias
+    pub fn speculative_step(&mut self, current_token: u32) -> Result<SpeculativeResult> {
+        self.step(current_token)
+    }
+
+    /// Prefill prompt on both models and return the first generated token from target.
+    pub fn prefill(&mut self, prompt: &[u32]) -> Result<u32> {
+        if prompt.is_empty() {
+            return Err(candle::Error::Msg("Cannot prefill empty prompt".into()));
+        }
+
+        let draft_input =
+            Tensor::from_slice(prompt, (1, prompt.len()), &self.draft_bonsai.model.device)?;
+        let _ = self.draft_bonsai.forward(&draft_input)?;
+
+        let target_input =
+            Tensor::from_slice(prompt, (1, prompt.len()), &self.target_verifier.device)?;
+        let logits = self.target_verifier.forward(&target_input)?;
+        let next_token = logits
+            .squeeze(0)?
+            .i(prompt.len() - 1)?
+            .argmax(candle::D::Minus1)?
+            .to_scalar::<u32>()?;
+        Ok(next_token)
+    }
+
+    /// Rollback KV caches on both models
+    pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
+        self.draft_bonsai.rollback_kv(pos)?;
+        self.target_verifier.rollback_kv(pos)?;
+        Ok(())
+    }
+
+    /// Reset KV caches on both models
+    pub fn reset_kv(&mut self) {
+        self.draft_bonsai.reset_kv();
+        self.target_verifier.reset_kv();
+    }
+}

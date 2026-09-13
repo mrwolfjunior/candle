@@ -3,7 +3,8 @@ pub mod kv_cache;
 pub mod model;
 pub mod server;
 
-pub use model::Bonsai27BWithKv;
+pub use engine::SuperDraftSpeculativeEngine;
+pub use model::{Bonsai27BWithKv, QuantizedQwen2WithKv};
 
 use clap::Parser;
 
