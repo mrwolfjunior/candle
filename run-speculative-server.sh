@@ -8,12 +8,16 @@ HOST=${HOST:-"0.0.0.0"}
 GAMMA=${GAMMA:-4}
 MAX_CONTEXT=${MAX_CONTEXT:-65536}
 
-# Default frontier models (Qwen3-Coder-30B-A3B target + Qwen3-0.6B draft)
+# Default frontier models (Super-Draft Bonsai-27B + Qwen3.8-27B or Qwen3-Coder)
+BONSAI_DRAFT="/mnt/data/LMStudio/lmstudio-community/Bonsai-27B-GGUF/Bonsai-27B-Q1_0.gguf"
+QWEN38_TARGET="/mnt/data/LMStudio/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"
 QWEN3_TARGET="/mnt/data/LMStudio/Qwen3-Coder/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
 QWEN3_DRAFT="/mnt/data/LMStudio/draft-models/Qwen3-0.6B-Q4_K_M.gguf"
 
 if [ -z "${TARGET_MODEL:-}" ]; then
-    if [ -f "$QWEN3_TARGET" ]; then
+    if [ -f "$QWEN38_TARGET" ]; then
+        TARGET_MODEL="$QWEN38_TARGET"
+    elif [ -f "$QWEN3_TARGET" ]; then
         TARGET_MODEL="$QWEN3_TARGET"
     elif [ -f "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" ]; then
         TARGET_MODEL="Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
@@ -23,7 +27,9 @@ if [ -z "${TARGET_MODEL:-}" ]; then
 fi
 
 if [ -z "${DRAFT_MODEL:-}" ]; then
-    if [ -f "$QWEN3_DRAFT" ]; then
+    if [ -f "$BONSAI_DRAFT" ]; then
+        DRAFT_MODEL="$BONSAI_DRAFT"
+    elif [ -f "$QWEN3_DRAFT" ]; then
         DRAFT_MODEL="$QWEN3_DRAFT"
     elif [ -f "Qwen3-0.6B-Q4_K_M.gguf" ]; then
         DRAFT_MODEL="Qwen3-0.6B-Q4_K_M.gguf"
