@@ -9,6 +9,7 @@ use std::io::Write;
 use tokenizers::Tokenizer;
 
 use candle::quantized::gguf_file;
+use candle::quantized::tokenizer::TokenizerFromGguf;
 use candle::Tensor;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
@@ -43,6 +44,10 @@ struct Args {
     /// is preserved.
     #[arg(long)]
     prompt: Option<String>,
+
+    /// Read the initial prompt from a file.
+    #[arg(long)]
+    prompt_file: Option<std::path::PathBuf>,
 
     /// The length of the sample to generate (in tokens).
     #[arg(short = 'n', long, default_value_t = 1000)]
@@ -95,21 +100,29 @@ struct Args {
 
 impl Args {
     fn tokenizer(&self) -> anyhow::Result<Tokenizer> {
-        let tokenizer_path = match &self.tokenizer {
-            Some(config) => std::path::PathBuf::from(config),
-            None => {
-                let api = candle_examples::hub::Api::new()?;
-                let repo = match self.which {
-                    Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
-                    Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
-                    Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
-                    Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
-                    Which::DeepseekR1Qwen7B => "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-                };
-                let api = api.model(repo);
-                api.get("tokenizer.json")?
+        if let Some(config) = &self.tokenizer {
+            return Tokenizer::from_file(config).map_err(anyhow::Error::msg);
+        }
+        if let Ok(model_path) = self.model() {
+            if let Ok(file) = std::fs::File::open(&model_path) {
+                let mut reader = std::io::BufReader::new(file);
+                if let Ok(content) = gguf_file::Content::read(&mut reader) {
+                    if let Ok(tok) = Tokenizer::from_gguf(&content) {
+                        return Ok(tok);
+                    }
+                }
             }
+        }
+        let api = candle_examples::hub::Api::new()?;
+        let repo = match self.which {
+            Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
+            Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
+            Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
+            Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
+            Which::DeepseekR1Qwen7B => "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
         };
+        let api = api.model(repo);
+        let tokenizer_path = api.get("tokenizer.json")?;
         Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)
     }
 
@@ -214,16 +227,21 @@ fn main() -> anyhow::Result<()> {
 
     let tokenizer = args.tokenizer()?;
     let mut tos = TokenOutputStream::new(tokenizer);
-    let prompt_str = args
-        .prompt
-        .clone()
-        .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    let prompt_content = if let Some(path) = &args.prompt_file {
+        std::fs::read_to_string(path)?
+    } else {
+        args.prompt.clone().unwrap_or_else(|| DEFAULT_PROMPT.to_string())
+    };
 
     let prompt_str = match args.which {
-        Which::DeepseekR1Qwen7B => format!("<｜User｜>{prompt_str}<｜Assistant｜>"),
-        _ => format!("<|im_start|>user\n{prompt_str}<|im_end|>\n<|im_start|>assistant\n"),
+        Which::DeepseekR1Qwen7B => format!("<｜User｜>{prompt_content}<｜Assistant｜>"),
+        _ => format!("<|im_start|>user\n{prompt_content}<|im_end|>\n<|im_start|>assistant\n"),
     };
-    print!("formatted instruct prompt: {}", prompt_str);
+    if prompt_str.len() > 300 {
+        println!("formatted instruct prompt: {}[... truncated {} chars]", &prompt_str[..200], prompt_str.len() - 200);
+    } else {
+        print!("formatted instruct prompt: {}", prompt_str);
+    }
     let tokens = tos
         .tokenizer()
         .encode(prompt_str, true)
@@ -261,6 +279,7 @@ fn main() -> anyhow::Result<()> {
         }
         next_token
     };
+
     let prompt_dt = start_prompt_processing.elapsed();
     all_tokens.push(next_token);
     if let Some(t) = tos.next_token(next_token)? {
@@ -273,7 +292,10 @@ fn main() -> anyhow::Result<()> {
         _ => "<|im_end|>",
     };
 
-    let eos_token = *tos.tokenizer().get_vocab(true).get(eos_token).unwrap();
+    let eos_token = tos
+        .tokenizer()
+        .token_to_id(eos_token)
+        .or_else(|| tos.tokenizer().token_to_id("<|endoftext|>"));
     let start_post_prompt = std::time::Instant::now();
     let mut sampled = 0;
     for index in 0..to_sample {
@@ -297,9 +319,11 @@ fn main() -> anyhow::Result<()> {
             std::io::stdout().flush()?;
         }
         sampled += 1;
-        if next_token == eos_token {
-            break;
-        };
+        if let Some(eos) = eos_token {
+            if next_token == eos {
+                break;
+            }
+        }
     }
     if let Some(rest) = tos.decode_rest().map_err(candle::Error::msg)? {
         print!("{rest}");
