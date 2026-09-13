@@ -101,6 +101,30 @@ impl Qwen35Config {
         self.ssm_conv_kernel.saturating_sub(1)
     }
 
+    /// Query dimension: `num_attention_heads * head_dim` = `24 * 256 = 6144`.
+    #[inline]
+    pub fn q_dim(&self) -> usize {
+        self.num_attention_heads * self.head_dim
+    }
+
+    /// Fused Query + Gate dimension: `2 * q_dim()` = `12288`.
+    #[inline]
+    pub fn q_gate_dim(&self) -> usize {
+        self.q_dim() * 2
+    }
+
+    /// Key/Value projection dimension: `num_key_value_heads * head_dim` = `4 * 256 = 1024`.
+    #[inline]
+    pub fn kv_dim(&self) -> usize {
+        self.num_key_value_heads * self.head_dim
+    }
+
+    /// Grouped-query repetition factor: `num_attention_heads / num_key_value_heads` = `24 / 4 = 6`.
+    #[inline]
+    pub fn gqa_groups(&self) -> usize {
+        self.num_attention_heads / self.num_key_value_heads
+    }
+
     /// Parse config from GGUF metadata, falling back to standard Bonsai-27B dimensions.
     pub fn from_gguf(ct: &candle::quantized::gguf_file::Content) -> Result<Self> {
         let arch = if let Some(candle::quantized::gguf_file::Value::String(arch)) =
