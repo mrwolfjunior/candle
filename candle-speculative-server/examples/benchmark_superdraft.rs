@@ -51,6 +51,10 @@ struct BenchmarkArgs {
     /// Run in mock mode with lightweight synthetic models
     #[arg(long, default_value_t = false)]
     mock: bool,
+
+    /// Simulate realistic ~75% draft acceptance rate with periodic rollbacks in mock mode
+    #[arg(long, default_value_t = false)]
+    simulate_divergence: bool,
 }
 
 fn parse_device(device_str: &str) -> anyhow::Result<Device> {
@@ -143,8 +147,28 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
     })
 }
 
-fn create_mock_draft(device: &Device, window_size: usize, max_context: usize) -> anyhow::Result<BonsaiModel> {
+fn create_mock_draft(
+    device: &Device,
+    window_size: usize,
+    max_context: usize,
+    simulate_divergence: bool,
+) -> anyhow::Result<BonsaiModel> {
     let mut target = create_mock_target(device, max_context)?;
+    if simulate_divergence {
+        let vocab_size = target.config.vocab_size;
+        let hidden_size = target.config.hidden_size;
+        let mut trans_matrix = vec![0.0f32; hidden_size * vocab_size];
+        for in_tok in 0..hidden_size.min(vocab_size) {
+            let out_tok = if in_tok % 4 == 0 {
+                (in_tok + 2) % vocab_size // 25% divergence
+            } else {
+                (in_tok + 1) % vocab_size // 75% match
+            };
+            trans_matrix[in_tok * vocab_size + out_tok] = 100.0;
+        }
+        let lm_head_t = Tensor::from_vec(trans_matrix, (vocab_size, hidden_size), device)?;
+        target.output = candle::quantized::QMatMul::Tensor(lm_head_t);
+    }
     for layer in &mut target.layers {
         layer.kv_cache = InPlaceKvCache::new(
             1,
@@ -179,6 +203,7 @@ fn main() -> anyhow::Result<()> {
     println!("Target Max Context: {} tokens", args.max_context);
     println!("Tokens to Generate: {}", args.gen_tokens);
     println!("Mock Mode:          {}", args.mock);
+    println!("Simulate Divergence: {}", args.simulate_divergence);
     println!("-------------------------------------------------------------------------------");
 
     let draft_dev = parse_device(&args.draft_device)?;
@@ -186,7 +211,7 @@ fn main() -> anyhow::Result<()> {
 
     let (draft_model, target_model) = if args.mock || args.draft_model.is_none() || args.target_model.is_none() {
         tracing::info!("Initializing mock/synthetic models for benchmark demonstration");
-        let draft = create_mock_draft(&draft_dev, args.draft_window, args.max_context)?;
+        let draft = create_mock_draft(&draft_dev, args.draft_window, args.max_context, args.simulate_divergence)?;
         let target = create_mock_target(&target_dev, args.max_context)?;
         (draft, target)
     } else {
