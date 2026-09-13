@@ -50,6 +50,149 @@ impl Config {
             max_position_embeddings: 131072,
         }
     }
+
+    pub fn bonsai_27b() -> Self {
+        Self {
+            hidden_size: 5120,
+            intermediate_size: 13824,
+            vocab_size: 248320,
+            num_hidden_layers: 64,
+            num_attention_heads: 40,
+            num_key_value_heads: 8,
+            rms_norm_eps: 1e-6,
+            rope_theta: 1_000_000.0,
+            max_position_embeddings: 32768,
+        }
+    }
+
+    pub fn from_gguf(ct: &candle::quantized::gguf_file::Content) -> Result<Self> {
+        let arch = if let Some(candle::quantized::gguf_file::Value::String(arch)) =
+            ct.metadata.get("general.architecture")
+        {
+            Some(arch.as_str())
+        } else {
+            None
+        };
+
+        let mut prefixes = Vec::new();
+        if let Some(a) = arch {
+            prefixes.push(a);
+        }
+        if !prefixes.contains(&"qwen35") {
+            prefixes.push("qwen35");
+        }
+        if !prefixes.contains(&"qwen2") {
+            prefixes.push("qwen2");
+        }
+
+        let find_u32 = |suffix: &str| -> Option<u32> {
+            for prefix in &prefixes {
+                let key = format!("{prefix}.{suffix}");
+                if let Some(val) = ct.metadata.get(&key) {
+                    if let Ok(v) = val.to_u32() {
+                        return Some(v);
+                    }
+                    if let Ok(v) = val.to_u64() {
+                        return Some(v as u32);
+                    }
+                }
+            }
+            if let Some(val) = ct.metadata.get(suffix) {
+                if let Ok(v) = val.to_u32() {
+                    return Some(v);
+                }
+                if let Ok(v) = val.to_u64() {
+                    return Some(v as u32);
+                }
+            }
+            None
+        };
+
+        let find_f32 = |suffix: &str| -> Option<f32> {
+            for prefix in &prefixes {
+                let key = format!("{prefix}.{suffix}");
+                if let Some(val) = ct.metadata.get(&key) {
+                    if let Ok(v) = val.to_f32() {
+                        return Some(v);
+                    }
+                    if let Ok(v) = val.to_f64() {
+                        return Some(v as f32);
+                    }
+                }
+            }
+            if let Some(val) = ct.metadata.get(suffix) {
+                if let Ok(v) = val.to_f32() {
+                    return Some(v);
+                }
+                if let Ok(v) = val.to_f64() {
+                    return Some(v as f32);
+                }
+            }
+            None
+        };
+
+        let hidden_size = find_u32("embedding_length")
+            .ok_or_else(|| candle::Error::Msg("missing embedding_length in GGUF metadata".into()))?
+            as usize;
+
+        let num_hidden_layers = find_u32("block_count")
+            .ok_or_else(|| candle::Error::Msg("missing block_count in GGUF metadata".into()))?
+            as usize;
+
+        let num_attention_heads = find_u32("attention.head_count")
+            .ok_or_else(|| candle::Error::Msg("missing attention.head_count in GGUF metadata".into()))?
+            as usize;
+
+        let num_key_value_heads = find_u32("attention.head_count_kv")
+            .map(|v| v as usize)
+            .unwrap_or(num_attention_heads);
+
+        let intermediate_size = find_u32("feed_forward_length")
+            .map(|v| v as usize)
+            .unwrap_or_else(|| {
+                if hidden_size == 5120 {
+                    13824
+                } else {
+                    hidden_size * 4
+                }
+            });
+
+        let max_position_embeddings = find_u32("context_length")
+            .map(|v| v as usize)
+            .unwrap_or(32768);
+
+        let rope_theta = find_f32("rope.freq_base").unwrap_or(1_000_000.0);
+
+        let rms_norm_eps = find_f32("attention.layer_norm_rms_epsilon")
+            .map(|v| v as f64)
+            .unwrap_or(1e-6);
+
+        let vocab_size = if let Some(v) = find_u32("vocab_size") {
+            v as usize
+        } else if let Some(candle::quantized::gguf_file::Value::Array(tokens)) =
+            ct.metadata.get("tokenizer.ggml.tokens")
+        {
+            tokens.len()
+        } else if let Some(tinfo) = ct.tensor_infos.get("token_embd.weight") {
+            tinfo.shape.dims()[0]
+        } else if prefixes.contains(&"qwen35") {
+            248320
+        } else {
+            151936
+        };
+
+        Ok(Self {
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            num_hidden_layers,
+            num_attention_heads,
+            num_key_value_heads,
+            rms_norm_eps,
+            rope_theta,
+            max_position_embeddings,
+        })
+    }
 }
 
 pub struct Layer {
@@ -95,6 +238,168 @@ impl QuantizedQwen2WithKv {
 
     pub fn current_kv_pos(&self) -> usize {
         self.layers.first().map(|l| l.kv_cache.current_pos()).unwrap_or(0)
+    }
+
+    pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
+        for layer in &mut self.layers {
+            layer.kv_cache.append(k, v)?;
+        }
+        Ok(())
+    }
+
+    pub fn append_kv_rolling(&mut self, k: &Tensor, v: &Tensor, window: usize) -> Result<()> {
+        for layer in &mut self.layers {
+            layer.kv_cache.append_rolling(k, v, window)?;
+        }
+        Ok(())
+    }
+
+    pub fn from_gguf<R: std::io::Seek + std::io::Read>(
+        ct: &candle::quantized::gguf_file::Content,
+        reader: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::from_gguf_with_max_seq_len(ct, reader, None, device)
+    }
+
+    pub fn from_gguf_with_max_seq_len<R: std::io::Seek + std::io::Read>(
+        ct: &candle::quantized::gguf_file::Content,
+        reader: &mut R,
+        max_seq_len: Option<usize>,
+        device: &Device,
+    ) -> Result<Self> {
+        let config = Config::from_gguf(ct)?;
+        let head_dim = config.head_dim();
+        let kv_max_len = max_seq_len.unwrap_or(config.max_position_embeddings);
+
+        let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
+        let tok_embeddings = tok_embeddings.dequantize(device)?;
+        let tok_embeddings = candle_nn::Embedding::new(tok_embeddings, config.hidden_size);
+
+        let norm = RmsNorm::from_qtensor(
+            ct.tensor(reader, "output_norm.weight", device)?,
+            config.rms_norm_eps,
+        )?;
+
+        let output = match ct.tensor(reader, "output.weight", device) {
+            Ok(v) => QMatMul::from_qtensor(v)?,
+            _ => QMatMul::from_qtensor(ct.tensor(reader, "token_embd.weight", device)?)?,
+        };
+
+        let (cos, sin) = precompute_freqs_cis(head_dim, config.rope_theta, kv_max_len, device)?;
+
+        let mut layers = Vec::with_capacity(config.num_hidden_layers);
+        for layer_idx in 0..config.num_hidden_layers {
+            let prefix = format!("blk.{layer_idx}");
+            let attention_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
+            let attention_wk = ct.tensor(reader, &format!("{prefix}.attn_k.weight"), device)?;
+            let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;
+            let attention_wo = ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
+            let attention_norm = ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?;
+
+            let ffn_gate = ct.tensor(reader, &format!("{prefix}.ffn_gate.weight"), device)?;
+            let ffn_down = ct.tensor(reader, &format!("{prefix}.ffn_down.weight"), device)?;
+            let ffn_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
+            let ffn_norm = ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?;
+
+            let kv_cache = InPlaceKvCache::new(
+                1,
+                config.num_key_value_heads,
+                head_dim,
+                kv_max_len,
+                DType::F32,
+                device,
+            )?;
+
+            layers.push(Layer {
+                attention_wq: QMatMul::from_qtensor(attention_wq)?,
+                attention_wk: QMatMul::from_qtensor(attention_wk)?,
+                attention_wv: QMatMul::from_qtensor(attention_wv)?,
+                attention_wo: QMatMul::from_qtensor(attention_wo)?,
+                attention_norm: RmsNorm::from_qtensor(attention_norm, config.rms_norm_eps)?,
+                ffn_gate: QMatMul::from_qtensor(ffn_gate)?,
+                ffn_down: QMatMul::from_qtensor(ffn_down)?,
+                ffn_up: QMatMul::from_qtensor(ffn_up)?,
+                ffn_norm: RmsNorm::from_qtensor(ffn_norm, config.rms_norm_eps)?,
+                kv_cache,
+                n_head: config.num_attention_heads,
+                n_kv_head: config.num_key_value_heads,
+                head_dim,
+            });
+        }
+
+        Ok(Self {
+            tok_embeddings,
+            layers,
+            norm,
+            output,
+            config,
+            device: device.clone(),
+            cos,
+            sin,
+        })
+    }
+}
+
+pub struct Bonsai27BWithKv {
+    pub model: QuantizedQwen2WithKv,
+    pub rolling_window: usize,
+}
+
+impl Bonsai27BWithKv {
+    pub const DEFAULT_ROLLING_WINDOW: usize = 8192;
+
+    pub fn new(model: QuantizedQwen2WithKv, rolling_window: usize) -> Self {
+        Self {
+            model,
+            rolling_window,
+        }
+    }
+
+    pub fn from_gguf<R: std::io::Seek + std::io::Read>(
+        ct: &candle::quantized::gguf_file::Content,
+        reader: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::from_gguf_with_window(ct, reader, Self::DEFAULT_ROLLING_WINDOW, device)
+    }
+
+    pub fn from_gguf_with_window<R: std::io::Seek + std::io::Read>(
+        ct: &candle::quantized::gguf_file::Content,
+        reader: &mut R,
+        rolling_window: usize,
+        device: &Device,
+    ) -> Result<Self> {
+        let model = QuantizedQwen2WithKv::from_gguf_with_max_seq_len(
+            ct,
+            reader,
+            Some(rolling_window),
+            device,
+        )?;
+        Ok(Self {
+            model,
+            rolling_window,
+        })
+    }
+
+    pub fn rolling_window(&self) -> usize {
+        self.rolling_window
+    }
+
+    pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
+        self.model.rollback_kv(pos)
+    }
+
+    pub fn reset_kv(&mut self) {
+        self.model.reset_kv()
+    }
+
+    pub fn current_kv_pos(&self) -> usize {
+        self.model.current_kv_pos()
+    }
+
+    pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
+        self.model.append_kv_rolling(k, v, self.rolling_window)
     }
 }
 

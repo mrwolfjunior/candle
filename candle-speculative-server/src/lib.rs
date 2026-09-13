@@ -3,6 +3,8 @@ pub mod kv_cache;
 pub mod model;
 pub mod server;
 
+pub use model::Bonsai27BWithKv;
+
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]

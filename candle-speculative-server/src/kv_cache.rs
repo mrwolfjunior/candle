@@ -104,6 +104,85 @@ impl InPlaceKvCache {
         Ok(())
     }
 
+    pub fn append_rolling(&mut self, k: &Tensor, v: &Tensor, window: usize) -> Result<()> {
+        let (kb, kh, seq_len, kd) = k.dims4()?;
+        let (vb, vh, v_seq_len, vd) = v.dims4()?;
+
+        if kb != self.b_sz || kh != self.n_kv_head || kd != self.head_dim {
+            return Err(Error::Msg(format!(
+                "KV cache append k shape mismatch: expected ({}, {}, seq_len, {}), got ({kb}, {kh}, {seq_len}, {kd})",
+                self.b_sz, self.n_kv_head, self.head_dim
+            )));
+        }
+        if vb != self.b_sz || vh != self.n_kv_head || vd != self.head_dim || v_seq_len != seq_len {
+            return Err(Error::Msg(format!(
+                "KV cache append v shape mismatch: expected ({}, {}, {seq_len}, {}), got ({vb}, {vh}, {v_seq_len}, {vd})",
+                self.b_sz, self.n_kv_head, self.head_dim
+            )));
+        }
+
+        if seq_len == 0 {
+            return Ok(());
+        }
+
+        let cap = window.min(self.max_seq_len);
+
+        if seq_len >= cap {
+            let k_slice = k.narrow(2, seq_len - cap, cap)?;
+            let v_slice = v.narrow(2, seq_len - cap, cap)?;
+            let k_cont = if k_slice.is_contiguous() {
+                k_slice
+            } else {
+                k_slice.contiguous()?
+            };
+            let v_cont = if v_slice.is_contiguous() {
+                v_slice
+            } else {
+                v_slice.contiguous()?
+            };
+            self.k_buf.slice_set(&k_cont, 2, 0)?;
+            self.v_buf.slice_set(&v_cont, 2, 0)?;
+            self.current_pos = cap;
+        } else if self.current_pos + seq_len <= cap {
+            let k_cont = if k.is_contiguous() {
+                k.clone()
+            } else {
+                k.contiguous()?
+            };
+            let v_cont = if v.is_contiguous() {
+                v.clone()
+            } else {
+                v.contiguous()?
+            };
+            self.k_buf.slice_set(&k_cont, 2, self.current_pos)?;
+            self.v_buf.slice_set(&v_cont, 2, self.current_pos)?;
+            self.current_pos += seq_len;
+        } else {
+            let evict = (self.current_pos + seq_len) - cap;
+            let keep_len = self.current_pos - evict;
+            let kept_k = self.k_buf.narrow(2, evict, keep_len)?.contiguous()?;
+            let kept_v = self.v_buf.narrow(2, evict, keep_len)?.contiguous()?;
+            self.k_buf.slice_set(&kept_k, 2, 0)?;
+            self.v_buf.slice_set(&kept_v, 2, 0)?;
+
+            let k_cont = if k.is_contiguous() {
+                k.clone()
+            } else {
+                k.contiguous()?
+            };
+            let v_cont = if v.is_contiguous() {
+                v.clone()
+            } else {
+                v.contiguous()?
+            };
+            self.k_buf.slice_set(&k_cont, 2, keep_len)?;
+            self.v_buf.slice_set(&v_cont, 2, keep_len)?;
+            self.current_pos = cap;
+        }
+
+        Ok(())
+    }
+
     pub fn current_view(&self) -> Result<(Tensor, Tensor)> {
         if self.current_pos == 0 {
             let empty_k = Tensor::zeros(
