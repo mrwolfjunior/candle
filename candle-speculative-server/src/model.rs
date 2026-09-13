@@ -211,6 +211,23 @@ pub struct Layer {
     pub head_dim: usize,
 }
 
+fn build_causal_mask(q_len: usize, kv_len: usize, device: &Device, dtype: DType) -> Result<Tensor> {
+    if q_len == 1 {
+        return Tensor::zeros((1, 1, 1, kv_len), dtype, device);
+    }
+    let mut mask = vec![0f32; q_len * kv_len];
+    let offset = if q_len > kv_len { q_len - kv_len } else { 0 };
+    for q in 0..q_len {
+        for k in 0..kv_len {
+            let key_pos = k + offset;
+            if key_pos > q {
+                mask[q * kv_len + k] = f32::NEG_INFINITY;
+            }
+        }
+    }
+    Tensor::from_vec(mask, (1, 1, q_len, kv_len), device)?.to_dtype(dtype)
+}
+
 impl Layer {
     pub fn forward(
         &mut self,
@@ -257,16 +274,11 @@ impl Layer {
         let k_all = candle_transformers::utils::repeat_kv(k_all, n_rep)?;
         let v_all = candle_transformers::utils::repeat_kv(v_all, n_rep)?;
 
+        let kv_len = k_all.dim(2)?;
         let mut att = (q.matmul(&k_all.t()?)? / (self.head_dim as f64).sqrt())?;
 
         if seq_len > 1 {
-            let mask = candle_transformers::utils::build_additive_causal_mask(
-                seq_len,
-                index_pos,
-                None,
-                att.device(),
-                att.dtype(),
-            )?;
+            let mask = build_causal_mask(seq_len, kv_len, att.device(), att.dtype())?;
             att = att.broadcast_add(&mask)?;
         }
 
