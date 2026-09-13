@@ -10,6 +10,19 @@ fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=src/cuda_utils.cuh");
     println!("cargo::rerun-if-changed=src/binary_op_macros.cuh");
     println!("cargo::rerun-if-env-changed=CANDLE_CUDA_ARCHS");
+    println!("cargo::rerun-if-env-changed=CUDA_COMPUTE_CAP");
+
+    if env::var("CUDA_COMPUTE_CAP").is_err() {
+        if let Ok(archs) = env::var("CANDLE_CUDA_ARCHS") {
+            let min_arch = archs
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .min();
+            if let Some(arch) = min_arch {
+                env::set_var("CUDA_COMPUTE_CAP", arch.to_string());
+            }
+        }
+    }
 
     // Build for PTX
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
