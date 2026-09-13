@@ -246,15 +246,19 @@ impl FusedMoeGGUF {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
 
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            // For long-context (32K+), need to use custom sort kernel
-            // #[cfg(feature = "cuda")]
-            // {
-            //     use attention_rs::sort::ArgSortOp;
-            //     topk_ids.flatten_all()?.sort(true)?
-            // }
-            // #[cfg(not(feature = "cuda"))]
-            topk_ids.flatten_all()?.sort_last_dim(true)?
+        let (expert_ids, sorted_token_ids) = if topk_ids.elem_count() > 1024 {
+            // Candle's GPU bitonic sort requires shared memory proportional to padded ncols,
+            // which overflows GPU shared memory limit (48KB on Pascal) for sequences > 1024.
+            // For longer sequences, sorting on CPU takes <0.5ms and prevents CUDA_ERROR_INVALID_VALUE.
+            let dev = topk_ids.device();
+            let flat = topk_ids.flatten_all()?;
+            let flat_vec = flat.to_vec1::<u32>()?;
+            let mut indices: Vec<u32> = (0..flat_vec.len() as u32).collect();
+            indices.sort_unstable_by_key(|&i| flat_vec[i as usize]);
+            let sorted_experts: Vec<u32> = indices.iter().map(|&i| flat_vec[i as usize]).collect();
+            let sorted_token_ids = Tensor::from_vec(indices, flat.shape(), dev)?;
+            let expert_ids = Tensor::from_vec(sorted_experts, flat.shape(), dev)?;
+            (expert_ids, sorted_token_ids)
         } else {
             topk_ids.flatten_all()?.sort_last_dim(true)?
         };
