@@ -516,7 +516,8 @@ impl Bonsai27BWithKv {
     }
 
     pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
-        self.model.rollback_kv(pos)
+        let clamped = pos.min(self.rolling_window).min(self.model.current_kv_pos());
+        self.model.rollback_kv(clamped)
     }
 
     pub fn reset_kv(&mut self) {
