@@ -186,11 +186,34 @@ fn main() -> anyhow::Result<()> {
         let mut draft_file = std::fs::File::open(draft_path)?;
         let draft_content = candle::quantized::gguf_file::Content::read(&mut draft_file)?;
         tracing::info!("Draft tensor count: {}", draft_content.tensor_infos.len());
+        tracing::info!("Draft metadata count: {}", draft_content.metadata.len());
+        for (k, v) in draft_content.metadata.iter() {
+            if k.contains("general.architecture") || k.contains("block_count") || k.contains("context") || k.contains("attention") {
+                tracing::info!("  Draft Meta: {} = {:?}", k, v);
+            }
+        }
         let mut draft_keys: Vec<_> = draft_content.tensor_infos.keys().cloned().collect();
         draft_keys.sort();
         for (i, name) in draft_keys.iter().take(20).enumerate() {
             tracing::info!("  Draft Tensor #{}: {}", i, name);
         }
+
+        tracing::info!("Inspecting Target model from {target_path} on {target_dev:?} (max_context={})", args.max_context);
+        let mut target_file = std::fs::File::open(target_path)?;
+        let target_content = candle::quantized::gguf_file::Content::read(&mut target_file)?;
+        tracing::info!("Target tensor count: {}", target_content.tensor_infos.len());
+        tracing::info!("Target metadata count: {}", target_content.metadata.len());
+        for (k, v) in target_content.metadata.iter() {
+            if k.contains("general.architecture") || k.contains("block_count") || k.contains("context") || k.contains("attention") {
+                tracing::info!("  Target Meta: {} = {:?}", k, v);
+            }
+        }
+        let mut target_keys: Vec<_> = target_content.tensor_infos.keys().cloned().collect();
+        target_keys.sort();
+        for (i, name) in target_keys.iter().take(20).enumerate() {
+            tracing::info!("  Target Tensor #{}: {}", i, name);
+        }
+
         let draft = BonsaiModel::from_gguf_with_window(
             &draft_content,
             &mut draft_file,
@@ -198,15 +221,6 @@ fn main() -> anyhow::Result<()> {
             &draft_dev,
         )?;
 
-        tracing::info!("Loading Target model from {target_path} on {target_dev:?} (max_context={})", args.max_context);
-        let mut target_file = std::fs::File::open(target_path)?;
-        let target_content = candle::quantized::gguf_file::Content::read(&mut target_file)?;
-        tracing::info!("Target tensor count: {}", target_content.tensor_infos.len());
-        let mut target_keys: Vec<_> = target_content.tensor_infos.keys().cloned().collect();
-        target_keys.sort();
-        for (i, name) in target_keys.iter().take(20).enumerate() {
-            tracing::info!("  Target Tensor #{}: {}", i, name);
-        }
         let target = TargetModel::from_gguf_with_max_seq_len(
             &target_content,
             &mut target_file,
