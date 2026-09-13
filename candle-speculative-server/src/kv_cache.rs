@@ -61,6 +61,10 @@ impl InPlaceKvCache {
         &self.v_buf
     }
 
+    pub fn dtype(&self) -> candle::DType {
+        self.k_buf.dtype()
+    }
+
     pub fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
         let (kb, kh, seq_len, kd) = k.dims4()?;
         let (vb, vh, v_seq_len, vd) = v.dims4()?;

@@ -273,10 +273,21 @@ impl Layer {
         let q = candle_nn::rotary_emb::rope(&q, &cos_pos, &sin_pos)?;
         let k = candle_nn::rotary_emb::rope(&k, &cos_pos, &sin_pos)?;
 
-        if let Some(window) = rolling_window {
-            self.kv_cache.append_rolling(&k, &v, window)?;
+        let k_to_append = if k.dtype() != self.kv_cache.dtype() {
+            k.to_dtype(self.kv_cache.dtype())?
         } else {
-            self.kv_cache.append(&k, &v)?;
+            k
+        };
+        let v_to_append = if v.dtype() != self.kv_cache.dtype() {
+            v.to_dtype(self.kv_cache.dtype())?
+        } else {
+            v
+        };
+
+        if let Some(window) = rolling_window {
+            self.kv_cache.append_rolling(&k_to_append, &v_to_append, window)?;
+        } else {
+            self.kv_cache.append(&k_to_append, &v_to_append)?;
         }
 
         let (k_all, v_all) = self.kv_cache.current_view()?;
@@ -284,6 +295,17 @@ impl Layer {
         let n_rep = self.n_head / self.n_kv_head;
         let k_all = candle_transformers::utils::repeat_kv(k_all, n_rep)?;
         let v_all = candle_transformers::utils::repeat_kv(v_all, n_rep)?;
+
+        let k_all = if k_all.dtype() != q.dtype() {
+            k_all.to_dtype(q.dtype())?
+        } else {
+            k_all
+        };
+        let v_all = if v_all.dtype() != q.dtype() {
+            v_all.to_dtype(q.dtype())?
+        } else {
+            v_all
+        };
 
         let kv_len = k_all.dim(2)?;
         let mut att = (q.matmul(&k_all.t()?)? / (self.head_dim as f64).sqrt())?;
@@ -431,12 +453,13 @@ impl QuantizedQwen2WithKv {
             let ffn_up = ct.tensor(reader, &format!("{prefix}.ffn_up.weight"), device)?;
             let ffn_norm = ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?;
 
+            let kv_dtype = if device.is_cuda() { DType::F16 } else { DType::F32 };
             let kv_cache = InPlaceKvCache::new(
                 1,
                 config.num_key_value_heads,
                 head_dim,
                 kv_max_len,
-                DType::F32,
+                kv_dtype,
                 device,
             )?;
 
