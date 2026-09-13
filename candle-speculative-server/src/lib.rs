@@ -1,10 +1,12 @@
 pub mod engine;
 pub mod kv_cache;
 pub mod model;
+pub mod qwen35_state;
 pub mod server;
 
 pub use engine::SuperDraftSpeculativeEngine;
 pub use model::{Bonsai27BWithKv, QuantizedQwen2WithKv};
+pub use qwen35_state::{Qwen35Config, Qwen35LayerState, Qwen35RecurrentState, Qwen35StateSnapshot};
 
 use clap::Parser;
 

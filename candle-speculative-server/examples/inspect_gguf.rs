@@ -17,9 +17,10 @@ fn main() -> anyhow::Result<()> {
         println!("  {k} = {:?}", v);
     }
 
-    println!("\n=== Tensors ({} total) ===", content.tensor_infos.len());
+    let filter = args.get(2).map(|s| s.as_str()).unwrap_or("blk.0.");
+    println!("\n=== Tensors matching '{}' ({} total) ===", filter, content.tensor_infos.len());
     for (k, v) in &content.tensor_infos {
-        if k.starts_with("blk.0.") || k.starts_with("blk.1.") || k.starts_with("token_") || k.starts_with("output") {
+        if k.contains(filter) || k.starts_with("token_") || k.starts_with("output") {
             println!("  {k}: shape={:?}, dtype={:?}", v.shape, v.ggml_dtype);
         }
     }
