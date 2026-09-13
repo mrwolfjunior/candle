@@ -2,13 +2,15 @@ pub mod engine;
 pub mod kv_cache;
 pub mod model;
 pub mod qwen35_attn;
+pub mod qwen35_model;
 pub mod qwen35_ssm;
 pub mod qwen35_state;
 pub mod server;
 
 pub use engine::SuperDraftSpeculativeEngine;
-pub use model::{Bonsai27BWithKv, QuantizedQwen2WithKv};
+pub use model::{Bonsai27BWithKv, BonsaiBackend, QuantizedQwen2WithKv};
 pub use qwen35_attn::Qwen35AttnLayer;
+pub use qwen35_model::{Qwen35Block, Qwen35Model, SwiGluFfn};
 pub use qwen35_ssm::Qwen35SsmLayer;
 pub use qwen35_state::{Qwen35Config, Qwen35LayerState, Qwen35RecurrentState, Qwen35StateSnapshot};
 

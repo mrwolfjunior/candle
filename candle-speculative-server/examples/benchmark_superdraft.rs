@@ -180,10 +180,7 @@ fn create_mock_draft(
             device,
         )?;
     }
-    Ok(BonsaiModel {
-        model: target,
-        rolling_window: window_size,
-    })
+    Ok(BonsaiModel::new(target, window_size))
 }
 
 fn main() -> anyhow::Result<()> {

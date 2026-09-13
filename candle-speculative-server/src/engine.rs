@@ -129,7 +129,7 @@ impl SuperDraftSpeculativeEngine {
         let mut next_in = current_token;
 
         for _ in 0..self.gamma {
-            let input_tensor = Tensor::new(&[[next_in]], &self.draft_bonsai.model.device)?;
+            let input_tensor = Tensor::new(&[[next_in]], self.draft_bonsai.device())?;
             let logits = self.draft_bonsai.forward(&input_tensor)?;
             let pred_token = logits
                 .squeeze(0)?
@@ -208,7 +208,7 @@ impl SuperDraftSpeculativeEngine {
             // Append the final accepted draft token into draft's cache to synchronize
             let t_sync_start = std::time::Instant::now();
             let last_draft_token = draft_tokens[self.gamma - 1];
-            let input_tensor = Tensor::new(&[[last_draft_token]], &self.draft_bonsai.model.device)?;
+            let input_tensor = Tensor::new(&[[last_draft_token]], self.draft_bonsai.device())?;
             let _ = self.draft_bonsai.forward(&input_tensor)?;
             self.draft_time += t_sync_start.elapsed();
         }
@@ -232,7 +232,7 @@ impl SuperDraftSpeculativeEngine {
 
         for chunk in prompt.chunks(chunk_size) {
             let draft_input =
-                Tensor::from_slice(chunk, (1, chunk.len()), &self.draft_bonsai.model.device)?;
+                Tensor::from_slice(chunk, (1, chunk.len()), self.draft_bonsai.device())?;
             let _ = self.draft_bonsai.forward(&draft_input)?;
 
             let target_input =

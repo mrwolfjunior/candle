@@ -4,6 +4,7 @@ use candle::{
 };
 use candle_transformers::quantized_nn::RmsNorm;
 use crate::kv_cache::InPlaceKvCache;
+use crate::qwen35_model::Qwen35Model;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -515,8 +516,13 @@ impl QuantizedQwen2WithKv {
     }
 }
 
+pub enum BonsaiBackend {
+    Qwen35(Qwen35Model),
+    Qwen2(QuantizedQwen2WithKv),
+}
+
 pub struct Bonsai27BWithKv {
-    pub model: QuantizedQwen2WithKv,
+    pub backend: BonsaiBackend,
     pub rolling_window: usize,
 }
 
@@ -525,7 +531,14 @@ impl Bonsai27BWithKv {
 
     pub fn new(model: QuantizedQwen2WithKv, rolling_window: usize) -> Self {
         Self {
-            model,
+            backend: BonsaiBackend::Qwen2(model),
+            rolling_window,
+        }
+    }
+
+    pub fn new_qwen35(model: Qwen35Model, rolling_window: usize) -> Self {
+        Self {
+            backend: BonsaiBackend::Qwen35(model),
             rolling_window,
         }
     }
@@ -544,44 +557,132 @@ impl Bonsai27BWithKv {
         rolling_window: usize,
         device: &Device,
     ) -> Result<Self> {
-        let model = QuantizedQwen2WithKv::from_gguf_with_max_seq_len(
-            ct,
-            reader,
-            Some(rolling_window),
-            device,
-        )?;
-        Ok(Self {
-            model,
-            rolling_window,
-        })
+        let arch = if let Some(candle::quantized::gguf_file::Value::String(arch)) =
+            ct.metadata.get("general.architecture")
+        {
+            Some(arch.as_str())
+        } else {
+            None
+        };
+
+        let has_ssm = ct.tensor_infos.contains_key("blk.0.attn_qkv.weight");
+        let is_qwen35 = has_ssm || arch == Some("qwen35");
+
+        if is_qwen35 && has_ssm {
+            let model = Qwen35Model::from_gguf_with_max_seq_len(
+                ct,
+                reader,
+                Some(rolling_window),
+                device,
+            )?;
+            Ok(Self {
+                backend: BonsaiBackend::Qwen35(model),
+                rolling_window,
+            })
+        } else {
+            let model = QuantizedQwen2WithKv::from_gguf_with_max_seq_len(
+                ct,
+                reader,
+                Some(rolling_window),
+                device,
+            )?;
+            Ok(Self {
+                backend: BonsaiBackend::Qwen2(model),
+                rolling_window,
+            })
+        }
     }
 
     pub fn rolling_window(&self) -> usize {
         self.rolling_window
     }
 
+    pub fn device(&self) -> &Device {
+        match &self.backend {
+            BonsaiBackend::Qwen35(m) => &m.device,
+            BonsaiBackend::Qwen2(m) => &m.device,
+        }
+    }
+
     pub fn rollback_kv(&mut self, pos: usize) -> Result<()> {
-        self.model.rollback_kv(pos)
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => m.rollback_kv(pos),
+            BonsaiBackend::Qwen2(m) => m.rollback_kv(pos),
+        }
     }
 
     pub fn reset_kv(&mut self) {
-        self.model.reset_kv()
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => m.reset_kv(),
+            BonsaiBackend::Qwen2(m) => m.reset_kv(),
+        }
     }
 
     pub fn current_kv_pos(&self) -> usize {
-        self.model.current_kv_pos()
+        match &self.backend {
+            BonsaiBackend::Qwen35(m) => m.current_kv_pos(),
+            BonsaiBackend::Qwen2(m) => m.current_kv_pos(),
+        }
     }
 
     pub fn kv_buffer_len(&self) -> usize {
-        self.model.kv_buffer_len()
+        match &self.backend {
+            BonsaiBackend::Qwen35(m) => m.kv_buffer_len(),
+            BonsaiBackend::Qwen2(m) => m.kv_buffer_len(),
+        }
     }
 
     pub fn append_kv(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
-        self.model.append_kv_rolling(k, v, self.rolling_window)
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => m.append_kv_rolling(k, v, self.rolling_window),
+            BonsaiBackend::Qwen2(m) => m.append_kv_rolling(k, v, self.rolling_window),
+        }
     }
 
     pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
-        self.model.forward_internal(input_ids, Some(self.rolling_window))
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => m.forward_internal(input_ids, Some(self.rolling_window)),
+            BonsaiBackend::Qwen2(m) => m.forward_internal(input_ids, Some(self.rolling_window)),
+        }
+    }
+
+    pub fn forward_internal(
+        &mut self,
+        input_ids: &Tensor,
+        rolling_window: Option<usize>,
+    ) -> Result<Tensor> {
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => m.forward_internal(input_ids, rolling_window),
+            BonsaiBackend::Qwen2(m) => m.forward_internal(input_ids, rolling_window),
+        }
+    }
+
+    pub fn as_qwen2(&self) -> Option<&QuantizedQwen2WithKv> {
+        match &self.backend {
+            BonsaiBackend::Qwen2(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_qwen2_mut(&mut self) -> Option<&mut QuantizedQwen2WithKv> {
+        match &mut self.backend {
+            BonsaiBackend::Qwen2(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_qwen35(&self) -> Option<&Qwen35Model> {
+        match &self.backend {
+            BonsaiBackend::Qwen35(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_qwen35_mut(&mut self) -> Option<&mut Qwen35Model> {
+        match &mut self.backend {
+            BonsaiBackend::Qwen35(m) => Some(m),
+            _ => None,
+        }
     }
 }
 

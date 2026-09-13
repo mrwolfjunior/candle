@@ -158,9 +158,9 @@ fn test_bonsai_loader_instantiation_on_device() -> candle::Result<()> {
 
     assert_eq!(bonsai.rolling_window(), 128);
     assert_eq!(bonsai.current_kv_pos(), 0);
-    assert_eq!(bonsai.model.layers.len(), 1);
-    assert_eq!(bonsai.model.config.hidden_size, 16);
-    assert_eq!(bonsai.model.config.intermediate_size, 32);
+    assert_eq!(bonsai.as_qwen2().unwrap().layers.len(), 1);
+    assert_eq!(bonsai.as_qwen2().unwrap().config.hidden_size, 16);
+    assert_eq!(bonsai.as_qwen2().unwrap().config.intermediate_size, 32);
     Ok(())
 }
 
@@ -264,7 +264,7 @@ fn test_bonsai_rolling_window_kv_logic() -> candle::Result<()> {
     assert_eq!(bonsai.kv_buffer_len(), 8);
 
     // Inspect KV cache contents via view
-    let (k_view, _) = bonsai.model.layers[0].kv_cache.current_view()?;
+    let (k_view, _) = bonsai.as_qwen2().unwrap().layers[0].kv_cache.current_view()?;
     assert_eq!(k_view.dims(), &[1, 2, 8, 4]);
     // The first token in the rolling cache should now have value 3.0
     let first_token = k_view.narrow(2, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
