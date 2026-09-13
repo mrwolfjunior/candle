@@ -142,8 +142,18 @@ fn create_mock_target(device: &Device, max_context: usize) -> anyhow::Result<Tar
     })
 }
 
-fn create_mock_draft(device: &Device, window_size: usize) -> anyhow::Result<BonsaiModel> {
-    let target = create_mock_target(device, window_size)?;
+fn create_mock_draft(device: &Device, window_size: usize, max_context: usize) -> anyhow::Result<BonsaiModel> {
+    let mut target = create_mock_target(device, max_context)?;
+    for layer in &mut target.layers {
+        layer.kv_cache = InPlaceKvCache::new(
+            1,
+            target.config.num_key_value_heads,
+            layer.head_dim,
+            window_size,
+            DType::F32,
+            device,
+        )?;
+    }
     Ok(BonsaiModel {
         model: target,
         rolling_window: window_size,
@@ -175,7 +185,7 @@ fn main() -> anyhow::Result<()> {
 
     let (draft_model, target_model) = if args.mock || args.draft_model.is_none() || args.target_model.is_none() {
         tracing::info!("Initializing mock/synthetic models for benchmark demonstration");
-        let draft = create_mock_draft(&draft_dev, args.draft_window)?;
+        let draft = create_mock_draft(&draft_dev, args.draft_window, args.max_context)?;
         let target = create_mock_target(&target_dev, args.max_context)?;
         (draft, target)
     } else {
