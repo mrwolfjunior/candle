@@ -93,16 +93,22 @@ In addition to the 0.6B draft model, this server implements **Super-Draft Specul
 - **Rollback Mechanics**: $O(1)$ in-place pointer rollback with window-safe boundary clamping.
 
 ### Empirical Benchmarks on Physical Hardware
-*Measured directly on physical dual-GPU hardware (`RTX 2070` cuda:0 + `Tesla P40` cuda:1, Xeon Broadwell 12C/24T, 31GB RAM) using `./target/release/examples/benchmark_superdraft` with $\gamma = 4$ and simulated divergence exercising rollback:*
+*Measured directly on physical dual-GPU hardware (`RTX 2070` cuda:0 + `Tesla P40` cuda:1, Xeon Broadwell 12C/24T, 31GB RAM) using `./target/release/examples/benchmark_superdraft` with $\gamma = 4$, simulated divergence exercising rollback, and FP16 KV cache on CUDA:*
 
-| Context Depth | Prefill Throughput | Speculative Decode | Acceptance Rate ($\alpha$) | Toks / Step ($\tau$) | Target GPU | Draft GPU |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **512 tokens** | 12,245.1 tok/s | **1,600.9 tok/s** | 92.9% | 4.71 | Tesla P40 (24GB) | RTX 2070 (8GB) |
-| **1,024 tokens** | 99,011.7 tok/s | **2,115.0 tok/s** | 75.0% | 4.00 | Tesla P40 (24GB) | RTX 2070 (8GB) |
-| **4,096 tokens** | 40,108.8 tok/s | **2,123.9 tok/s** | 86.7% | 4.47 | Tesla P40 (24GB) | RTX 2070 (8GB) |
-| **8,192 tokens** | 27,794.0 tok/s | **1,959.8 tok/s** | 92.9% | 4.71 | Tesla P40 (24GB) | RTX 2070 (8GB) |
-| **16,384 tokens** | 17,836.3 tok/s | **1,505.7 tok/s** | 75.0% | 4.00 | Tesla P40 (24GB) | RTX 2070 (8GB) |
-| **64,000 tokens** | 6,394.5 tok/s | **891.8 tok/s** | 100.0% | 5.00 | Tesla P40 (24GB) | RTX 2070 (8GB) |
+| Context Depth | Prefill Throughput | Speculative Decode | Acceptance ($\alpha$) | Toks / Step ($\tau$) | Draft Latency | Target Latency | Target / Draft | KV Cache Size (Target) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **512 tokens** | 11,056.9 tok/s | **1,470.9 tok/s** | 92.9% | 4.71 | 2.39 ms | 0.82 ms | 0.34x | 2.0 MB (mock) / 134 MB (27B) |
+| **1,024 tokens** | 96,149.2 tok/s | **1,925.1 tok/s** | 75.0% | 4.00 | 1.69 ms | 0.38 ms | 0.22x | 4.0 MB (mock) / 268 MB (27B) |
+| **4,096 tokens** | 41,354.7 tok/s | **2,134.9 tok/s** | 86.7% | 4.47 | 1.64 ms | 0.45 ms | 0.27x | 16.0 MB (mock) / 1.07 GB (27B) |
+| **8,192 tokens** | 27,709.6 tok/s | **1,947.7 tok/s** | 92.9% | 4.71 | 1.77 ms | 0.65 ms | 0.37x | 32.0 MB (mock) / 2.15 GB (27B) |
+| **16,384 tokens** | 17,797.1 tok/s | **1,405.7 tok/s** | 75.0% | 4.00 | 1.83 ms | 1.01 ms | 0.55x | 64.0 MB (mock) / 4.29 GB (27B) |
+| **64,000 tokens** | 6,358.1 tok/s | **870.7 tok/s** | 100.0% | 5.00 | 1.90 ms | 3.84 ms | **2.02x** | 250.0 MB (mock) / 16.78 GB (27B) |
+
+#### Empirical Observations & Key Takeaways
+1. **Draft Latency Invariance via Rolling Window**: Due to the fixed 8,192-token rolling window on the RTX 2070, draft generation latency remains completely invariant (~1.64–1.90 ms) regardless of whether total context is 1,024 or 64,000 tokens.
+2. **Target Verification Scaling**: Target verification latency scales directly with context depth (0.38 ms at 1k $\rightarrow$ 3.84 ms at 64k). At 64k tokens, target verification time exceeds draft proposal time (Target/Draft ratio 2.02x), marking the crossover where extreme-context verification dominates pipeline throughput.
+3. **KV Cache Memory Footprint**: In FP16, a 64k context target cache on a 64-layer 27B model occupies **16.78 GB**, safely fitting within the 24 GB VRAM of the Tesla P40 (in contrast to FP32 which would require 33.56 GB and exceed card capacity).
+4. **Architectural Scaling vs. Full-Weight Deployment**: This empirical benchmark validates the dual-GPU pipeline mechanics, chunked prefill, window-aligned causal masking, and rollback synchronization across physical PCIe lanes up to 64k context without quadratic memory explosion. Real-weight inference for `Bonsai-27B` (`qwen35` GGUF architecture) additionally requires hybrid Mamba-2 SSM recurrent kernels for the `blk.N.ssm_*` layers alongside the GGML Type 41 (`Q1_0`) dequantizer implemented in Candle.
 
 ### Reproducing the 64k Super-Draft Benchmark
 To run the benchmark suite across all 6 context depths on physical hardware:
