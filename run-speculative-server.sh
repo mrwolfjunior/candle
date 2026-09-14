@@ -15,10 +15,10 @@ QWEN3_TARGET="/mnt/data/LMStudio/Qwen3-Coder/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M
 QWEN3_DRAFT="/mnt/data/LMStudio/draft-models/Qwen3-0.6B-Q4_K_M.gguf"
 
 if [ -z "${TARGET_MODEL:-}" ]; then
-    if [ -f "$QWEN38_TARGET" ]; then
-        TARGET_MODEL="$QWEN38_TARGET"
-    elif [ -f "$QWEN3_TARGET" ]; then
+    if [ -f "$QWEN3_TARGET" ]; then
         TARGET_MODEL="$QWEN3_TARGET"
+    elif [ -f "$QWEN38_TARGET" ]; then
+        TARGET_MODEL="$QWEN38_TARGET"
     elif [ -f "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" ]; then
         TARGET_MODEL="Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
     else
@@ -27,10 +27,10 @@ if [ -z "${TARGET_MODEL:-}" ]; then
 fi
 
 if [ -z "${DRAFT_MODEL:-}" ]; then
-    if [ -f "$BONSAI_DRAFT" ]; then
-        DRAFT_MODEL="$BONSAI_DRAFT"
-    elif [ -f "$QWEN3_DRAFT" ]; then
+    if [ -f "$QWEN3_DRAFT" ]; then
         DRAFT_MODEL="$QWEN3_DRAFT"
+    elif [ -f "$BONSAI_DRAFT" ]; then
+        DRAFT_MODEL="$BONSAI_DRAFT"
     elif [ -f "Qwen3-0.6B-Q4_K_M.gguf" ]; then
         DRAFT_MODEL="Qwen3-0.6B-Q4_K_M.gguf"
     else
