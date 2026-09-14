@@ -31,12 +31,17 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
+EXTRA_ARGS=()
+if [[ "$*" != *"-n "* ]] && [[ "$*" != *"--sample-len"* ]]; then
+    EXTRA_ARGS+=("-n" "$SAMPLE_LEN")
+fi
+
 if [[ "$1" == --* ]]; then
     CUDA_VISIBLE_DEVICES="$GPU_ID" "$BIN" \
         --model "$MODEL" \
         --chunk-size "$CHUNK_SIZE" \
-        -n "$SAMPLE_LEN" \
         --temperature "$TEMP" \
+        "${EXTRA_ARGS[@]}" \
         "$@"
 else
     PROMPT="$1"
@@ -45,7 +50,7 @@ else
         --model "$MODEL" \
         --prompt "$PROMPT" \
         --chunk-size "$CHUNK_SIZE" \
-        -n "$SAMPLE_LEN" \
         --temperature "$TEMP" \
+        "${EXTRA_ARGS[@]}" \
         "$@"
 fi
