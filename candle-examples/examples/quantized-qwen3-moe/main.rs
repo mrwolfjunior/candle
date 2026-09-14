@@ -107,7 +107,7 @@ struct Args {
     #[arg(long, default_value = "16b_q2k")]
     which: Which,
 
-    #[arg(long, default_value = "bf16")]
+    #[arg(long, default_value = "f16")]
     dtype: String,
 }
 
