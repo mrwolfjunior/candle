@@ -193,8 +193,9 @@ impl Qwen35Config {
         };
 
         let hidden_size = find_u32("embedding_length").unwrap_or(5120) as usize;
-        let intermediate_size = find_u32("feed_forward_length").unwrap_or(17408) as usize;
-        let num_hidden_layers = find_u32("block_count").unwrap_or(64) as usize;
+        let nextn_layers = find_u32("nextn_predict_layers").unwrap_or(0) as usize;
+        let raw_block_count = find_u32("block_count").unwrap_or(64) as usize;
+        let num_hidden_layers = raw_block_count.saturating_sub(nextn_layers);
         let full_attn_interval = find_u32("full_attention_interval").unwrap_or(4) as usize;
         let ssm_conv_kernel = find_u32("ssm_conv_kernel").unwrap_or(4) as usize;
         let ssm_d_state = find_u32("ssm_d_state").unwrap_or(128) as usize;
