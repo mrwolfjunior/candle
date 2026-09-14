@@ -269,8 +269,8 @@ impl Qwen35Model {
         if seq_len == 1 {
             let current_pos = self.total_tokens_seen;
             self.state_snapshots.push((current_pos, self.recurrent_state.snapshot()?));
-            if self.state_snapshots.len() > 256 {
-                self.state_snapshots.drain(0..self.state_snapshots.len() - 128);
+            if self.state_snapshots.len() > 16 {
+                self.state_snapshots.drain(0..self.state_snapshots.len() - 8);
             }
 
             let mut xs = self.embed_input(input_ids)?; // [1, 1, hidden_size]
@@ -310,8 +310,8 @@ impl Qwen35Model {
             for t in 0..seq_len {
                 let token_pos = self.total_tokens_seen;
                 self.state_snapshots.push((token_pos, self.recurrent_state.snapshot()?));
-                if self.state_snapshots.len() > 256 {
-                    self.state_snapshots.drain(0..self.state_snapshots.len() - 128);
+                if self.state_snapshots.len() > 16 {
+                    self.state_snapshots.drain(0..self.state_snapshots.len() - 8);
                 }
 
                 let single_token = input_ids.narrow(1, t, 1)?; // [1, 1]

@@ -293,18 +293,23 @@ impl Qwen35LayerState {
         Ok(())
     }
 
-    /// Create a shallow snapshot of this layer's state in $O(1)$ time.
+    /// Create a shallow snapshot of this layer's state on CPU to conserve GPU VRAM.
     pub fn snapshot(&self) -> Result<Self> {
         Ok(Self {
-            conv_state: self.conv_state.clone(),
-            ssm_state: self.ssm_state.clone(),
+            conv_state: self.conv_state.to_device(&Device::Cpu)?,
+            ssm_state: self.ssm_state.to_device(&Device::Cpu)?,
         })
     }
 
-    /// Restore state from a snapshot.
+    /// Restore state from a snapshot, moving tensors back to this layer's device.
     pub fn restore(&mut self, snapshot: &Self) {
-        self.conv_state = snapshot.conv_state.clone();
-        self.ssm_state = snapshot.ssm_state.clone();
+        let dev = self.ssm_state.device().clone();
+        if let Ok(conv) = snapshot.conv_state.to_device(&dev) {
+            self.conv_state = conv;
+        }
+        if let Ok(ssm) = snapshot.ssm_state.to_device(&dev) {
+            self.ssm_state = ssm;
+        }
     }
 }
 
