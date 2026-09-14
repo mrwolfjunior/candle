@@ -193,6 +193,7 @@ impl Qwen35Config {
         };
 
         let hidden_size = find_u32("embedding_length").unwrap_or(5120) as usize;
+        let intermediate_size = find_u32("feed_forward_length").unwrap_or(17408) as usize;
         let nextn_layers = find_u32("nextn_predict_layers").unwrap_or(0) as usize;
         let raw_block_count = find_u32("block_count").unwrap_or(64) as usize;
         let num_hidden_layers = raw_block_count.saturating_sub(nextn_layers);
